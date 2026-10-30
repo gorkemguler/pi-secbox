@@ -6,7 +6,7 @@ zamanlanmış görevler, kapsam listesi, Docker konteynerleri ve Cloudflare yay�
 listesiyle çağırıyor.
 
 Flask ile yazıldı, Debian paketleriyle çalışıyor (`python3-flask`, `python3-waitress`);
-pip ya da sanal ortam gerekmiyor. Pi 4'te boşta 40 MB civarı bellek kullanıyor.
+pip ya da sanal ortam gerekmiyor. Pi 4'te boşta 35-40 MB bellek kullanıyor.
 
 ## Kurulum
 

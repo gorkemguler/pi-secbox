@@ -33,6 +33,7 @@ case $name in
         echo "${MOCK_RESOLVE:-198.51.100.7}"
         ;;
     proxychains4)
+        if [ "$1" = -q ]; then shift; fi
         [ "$1" = -f ] || exit 99
         cp "$2" "$MOCK_DIR/proxychains.conf"
         shift 2

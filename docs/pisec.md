@@ -38,14 +38,18 @@ pisec web https://hedef.com --no-nuclei   # sadece başlıklar ve TLS
 | Alan adı çözümü | yerel DNS | `tor-resolve` ile Tor üzerinden; nmap'e ve testssl'e IP verilir |
 | testssl.sh | doğrudan | proxychains üzerinden, `--ip` ve `--nodns none` ile; testssl kendi DNS sorgusunu yapmaz |
 | nuclei | tüm şablonlar | sadece HTTP şablonları (`-pt http`), interactsh kapalı (`-ni`), SOCKS5 proxy |
-| subfinder, httpx | doğrudan | SOCKS5 proxy |
+| subfinder, httpx | doğrudan | SOCKS5 proxy; subfinder'ın crt.sh kaynağı kapalı (veritabanına proxy'siz bağlanıyor) |
 | dnsx | çalışır | atlanır, DNS sorgularını kendisi yapıyor |
 | Yerel ağ, özel adresler | taranır | reddedilir, Tor çıkışları senin ağına ulaşamaz |
 
 Her `pisec` çalıştırması Tor'a farklı bir SOCKS kullanıcı adıyla bağlanır. Tor bu
 bağlantıları ayrı devrelerden geçiriyor (`IsolateSOCKSAuth`), yani iki tarama aynı
 çıkış IP'sini paylaşmaz. `pisec` kendi proxychains ayarını geçici bir dosyaya yazıyor;
-`/etc/proxychains4.conf`'a bağlı değil.
+`/etc/proxychains4.conf`'a bağlı değil. ProjectDiscovery araçlarının açılıştaki
+sürüm kontrolü (`api.pdtm.sh`) her modda kapalı.
+
+Pi 4 üzerinde, Tor modundaki `scan`, `web` ve `recon` çalışırken Pi'den çıkan DNS
+trafiği tcpdump ile kaydedildi: hedef alan adları için hiç DNS sorgusu çıkmadı.
 
 Tor üzerinden tarama yavaştır ve çoğu çıkış noktası 25, 445 gibi portlara izin vermez.
 Cloudflare arkasındaki pek çok site Tor çıkışlarını engelliyor; nuclei'nin Tor ile
@@ -117,7 +121,7 @@ olmalı; `setup.sh` açıyor.
 
 Zamanlanmış görev onay soramadığı için hedefin kapsam listesinde olması gerekiyor;
 sonradan listeden çıkarılırsa görev bir sonraki çalışmada hata verip durur.
-Çıktısını görmek için: `journalctl --user -u pisec-job-<ad>`.
+Çıktısını görmek için: `journalctl --user-unit pisec-job-<ad>`.
 
 ## Bildirimler
 

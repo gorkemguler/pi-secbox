@@ -124,7 +124,8 @@ setup() {
     run "$PISEC" scan hedef.com --tor -y
     [ "$status" -eq 0 ]
     calls tor-resolve | grep -q 'hedef.com 127.0.0.1:9050'
-    calls proxychains4 | grep -q -- '-f .*proxychains.conf nmap -sT -Pn -n --open --top-ports 100 -oA .*/nmap 198.51.100.7$'
+    calls proxychains4 | grep -q -- '-q -f .*/proxychains-fast.conf nmap -sT -Pn -n --open --top-ports 100 -oA .*/nmap 198.51.100.7$'
+    grep -q '^tcp_read_time_out 15000$' "$MOCK_DIR/proxychains.conf"
     grep -q '^socks5 127.0.0.1 9050 pisec[0-9]* x$' "$MOCK_DIR/proxychains.conf"
     grep -q '^proxy_dns$' "$MOCK_DIR/proxychains.conf"
 
@@ -183,7 +184,7 @@ setup() {
     run "$PISEC" recon hedef.com --tor -y
     [ "$status" -eq 0 ]
     not_called dnsx
-    calls subfinder | grep -q -- '-proxy socks5://pisec[0-9]*:x@127.0.0.1:9050'
+    calls subfinder | grep -q -- '-proxy socks5://pisec[0-9]*:x@127.0.0.1:9050 -es crtsh'
     calls httpx | grep -q -- '-proxy socks5://pisec[0-9]*:x@127.0.0.1:9050'
 }
 
@@ -224,8 +225,9 @@ setup() {
 @test "web Tor ile testssl'e Tor'dan çözülen adresi verir, nuclei'yi HTTP şablonlarıyla sınırlar" {
     run "$PISEC" web https://hedef.com --tor -y
     [ "$status" -eq 0 ]
-    calls curl | grep -q -- '--proxy socks5h://pisec[0-9]*:x@127.0.0.1:9050 https://hedef.com$'
-    calls proxychains4 | grep -q -- 'testssl .* --ip 198.51.100.7 --nodns none https://hedef.com$'
+    calls curl | grep -q -- '-k -L --max-time 90 .*--proxy socks5h://pisec[0-9]*:x@127.0.0.1:9050 https://hedef.com$'
+    calls proxychains4 | grep -q -- '-q -f .*/proxychains-slow.conf testssl .* --ip 198.51.100.7 --nodns none https://hedef.com$'
+    grep -q '^tcp_read_time_out 60000$' "$MOCK_DIR/proxychains.conf"
     calls nuclei | grep -q -- '-proxy socks5://pisec[0-9]*:x@127.0.0.1:9050 -pt http -ni'
     [[ $(latest_summary) == *"Tor modunda sadece HTTP şablonları çalıştı"* ]]
 }

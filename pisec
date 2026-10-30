@@ -41,6 +41,7 @@ TOR_EXIT_IP=""
 TOR_USER=""
 PROXY_URL=""
 PROXYCHAINS_CONF=""
+PROXYCHAINS_SLOW_CONF=""
 HIGHLIGHTS=()
 
 log()  { printf '[+] %s\n' "$*"; }
@@ -336,24 +337,32 @@ tor_setup() {
     # (IsolateSOCKSAuth). Her çalıştırma kendi kullanıcı adıyla kendi devresini alır.
     TOR_USER="pisec$$$RANDOM"
     PROXY_URL="socks5://$TOR_USER:x@$SOCKS"
-    PROXYCHAINS_CONF="$TMP_DIR/proxychains.conf"
-    cat > "$PROXYCHAINS_CONF" <<EOF
+    # Tor'da ilk bağlantı yeni devre kurulurken 30-40 saniye sürebiliyor. nmap için
+    # bekleme kısa tutuluyor (filtreli her port bu kadar bekletiyor), testssl için uzun.
+    PROXYCHAINS_CONF=$(write_proxychains_conf fast 15000)
+    PROXYCHAINS_SLOW_CONF=$(write_proxychains_conf slow 60000)
+    local resp
+    resp=$(curl -fsS --max-time 60 --proxy "socks5h://$TOR_USER:x@$SOCKS" "$CHECK_URL" 2>/dev/null) \
+        || die "Tor'a bağlanılamadı ($SOCKS). 'pisec tor status' ile kontrol et."
+    [ "$(jq -r .IsTor <<<"$resp")" = "true" ] || die "Bağlantı Tor'dan çıkmıyor: $resp"
+    TOR_EXIT_IP=$(jq -r .IP <<<"$resp")
+    log "Tor çıkış IP'si: $TOR_EXIT_IP"
+}
+
+write_proxychains_conf() {
+    local f="$TMP_DIR/proxychains-$1.conf"
+    cat > "$f" <<EOF
 strict_chain
 quiet_mode
 proxy_dns
 remote_dns_subnet 224
-tcp_read_time_out 15000
+tcp_read_time_out $2
 tcp_connect_time_out 8000
 
 [ProxyList]
 socks5 ${SOCKS%:*} ${SOCKS##*:} $TOR_USER x
 EOF
-    local resp
-    resp=$(curl -fsS --max-time 30 --proxy "socks5h://$TOR_USER:x@$SOCKS" "$CHECK_URL" 2>/dev/null) \
-        || die "Tor'a bağlanılamadı ($SOCKS). 'pisec tor status' ile kontrol et."
-    [ "$(jq -r .IsTor <<<"$resp")" = "true" ] || die "Bağlantı Tor'dan çıkmıyor: $resp"
-    TOR_EXIT_IP=$(jq -r .IP <<<"$resp")
-    log "Tor çıkış IP'si: $TOR_EXIT_IP"
+    printf '%s\n' "$f"
 }
 
 # Alan adını Tor üzerinden çözer; DNS sorgusu yerel ağdan çıkmaz.
@@ -574,7 +583,7 @@ cmd_scan() {
     if [ "$addr" != "$target" ]; then note "- Adres: $addr (Tor üzerinden çözüldü)"; fi
     if [ "$USE_TOR" -eq 1 ]; then
         warn "Tor üzerinden tarama yavaş; çıkış noktalarının çoğu 25, 445 gibi portlara izin vermiyor."
-        run proxychains4 -f "$PROXYCHAINS_CONF" nmap "${nmap_args[@]}" "$@" -oA "$RUN_DIR/nmap" "$addr"
+        run proxychains4 -q -f "$PROXYCHAINS_CONF" nmap "${nmap_args[@]}" "$@" -oA "$RUN_DIR/nmap" "$addr"
     else
         run nmap "${nmap_args[@]}" "$@" -oA "$RUN_DIR/nmap" "$addr"
     fi
@@ -590,8 +599,10 @@ cmd_scan() {
     fi
 
     if [ -n "$prev" ] && [ -f "$prev/nmap.gnmap" ]; then
-        new=$(comm -13 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
-        gone=$(comm -23 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
+        # comm de sort ile aynı sıralama kuralını kullanmalı; yoksa tr_TR, en_GB gibi
+        # yerellerde "80/tcp" ile "8080/tcp"nin sırası tutmuyor ve comm hata veriyor.
+        new=$(LC_ALL=C comm -13 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
+        gone=$(LC_ALL=C comm -23 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
         note "" "## Önceki taramaya göre ($(basename "$prev"))" ""
         if [ -z "$new" ] && [ -z "$gone" ]; then
             note "Değişiklik yok."
@@ -612,7 +623,7 @@ cmd_scan() {
 
 cmd_recon() {
     [ $# -eq 1 ] || die "Kullanım: pisec recon <alan-adı> [--tor]"
-    local domain=${1,,} prev proxy_args=() new gone subs web
+    local domain=${1,,} prev proxy_args=() subfinder_args=() new gone subs web
     if ! is_domain "$domain" || is_ipv4 "$domain"; then die "Geçersiz alan adı: $domain"; fi
     need subfinder httpx
     check_scope "$domain"
@@ -621,24 +632,27 @@ cmd_recon() {
     if [ "$USE_TOR" -eq 1 ]; then
         tor_setup
         proxy_args=(-proxy "$PROXY_URL")
+        # crt.sh kaynağı önce crt.sh'ın PostgreSQL sunucusuna doğrudan bağlanıyor,
+        # proxy'yi kullanmıyor. Tor modunda kapatılıyor.
+        subfinder_args=(-es crtsh)
     else
         need dnsx
     fi
 
     start_run recon "$domain"
     log "Alt alan adları toplanıyor (subfinder, pasif kaynaklar)"
-    run subfinder -d "$domain" -silent -o "$RUN_DIR/subdomains.txt" "${proxy_args[@]}" \
+    run subfinder -d "$domain" -silent -duc -o "$RUN_DIR/subdomains.txt" "${proxy_args[@]}" "${subfinder_args[@]}" \
         || warn "subfinder hata koduyla bitti ($?)."
     touch "$RUN_DIR/subdomains.txt"
 
     if [ "$USE_TOR" -eq 0 ]; then
         log "DNS kayıtları çözülüyor (dnsx)"
-        run dnsx -l "$RUN_DIR/subdomains.txt" -silent -a -resp -o "$RUN_DIR/dns.txt" \
+        run dnsx -l "$RUN_DIR/subdomains.txt" -silent -duc -a -resp -o "$RUN_DIR/dns.txt" \
             || warn "dnsx hata koduyla bitti ($?)."
     fi
 
     log "Canlı web servisleri aranıyor (httpx)"
-    run httpx -l "$RUN_DIR/subdomains.txt" -silent -nc -sc -title -td -o "$RUN_DIR/web.txt" "${proxy_args[@]}" \
+    run httpx -l "$RUN_DIR/subdomains.txt" -silent -duc -nc -sc -title -td -o "$RUN_DIR/web.txt" "${proxy_args[@]}" \
         || warn "httpx hata koduyla bitti ($?)."
 
     subs=$(count_lines "$RUN_DIR/subdomains.txt")
@@ -651,7 +665,8 @@ cmd_recon() {
             note "- DNS kaydı olan: 0"
         fi
     else
-        note "- DNS çözümlemesi Tor modunda atlandı (dnsx kendi DNS sorgularını yapıyor)."
+        note "- DNS çözümlemesi Tor modunda atlandı (dnsx kendi DNS sorgularını yapıyor)." \
+             "- subfinder'ın crt.sh kaynağı Tor modunda kapalı (veritabanına doğrudan bağlanıyor)."
     fi
     note "- Canlı web servisi: $web"
     HIGHLIGHTS+=("$subs alt alan adı, $web canlı web servisi.")
@@ -661,8 +676,8 @@ cmd_recon() {
     fi
 
     if [ -n "$prev" ] && [ -f "$prev/subdomains.txt" ]; then
-        new=$(comm -13 <(sort -u "$prev/subdomains.txt") <(sort -u "$RUN_DIR/subdomains.txt"))
-        gone=$(comm -23 <(sort -u "$prev/subdomains.txt") <(sort -u "$RUN_DIR/subdomains.txt"))
+        new=$(LC_ALL=C comm -13 <(LC_ALL=C sort -u "$prev/subdomains.txt") <(LC_ALL=C sort -u "$RUN_DIR/subdomains.txt"))
+        gone=$(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$prev/subdomains.txt") <(LC_ALL=C sort -u "$RUN_DIR/subdomains.txt"))
         note "" "## Önceki çalıştırmaya göre ($(basename "$prev"))" ""
         if [ -n "$new" ]; then
             note "Yeni alt alan adları:" "" "$(printf '%s\n' "$new" | sed 's/^/- /')" ""
@@ -727,7 +742,7 @@ testssl_summary() {
 
 cmd_web() {
     [ $# -eq 1 ] || die "Kullanım: pisec web <url> [--tor] [--no-nuclei] [--no-tls]"
-    local url=$1 host addr curl_proxy=() nuclei_extra=() count
+    local url=$1 host addr curl_proxy=() nuclei_extra=() count timeout=30
     case $url in http://*|https://*) ;; *) url="https://$url" ;; esac
     host=$(url_host "$url")
     host=${host,,}
@@ -744,6 +759,7 @@ cmd_web() {
         fi
         tor_setup
         curl_proxy=(--proxy "socks5h://$TOR_USER:x@$SOCKS")
+        timeout=90
         # dns, ssl, network şablonları bağlantıyı kendisi açıyor ve proxy'yi kullanmıyor.
         # interactsh (OAST) istekleri de Tor dışından gidiyor.
         nuclei_extra=(-proxy "$PROXY_URL" -pt http -ni -timeout 20 -retries 1)
@@ -753,7 +769,8 @@ cmd_web() {
     note "- URL: $url"
 
     log "HTTP başlıkları alınıyor"
-    run curl -sS -L --max-time 30 -o /dev/null -D "$RUN_DIR/headers.txt" "${curl_proxy[@]}" "$url" \
+    # -k: sertifika geçersiz olsa da başlıklara bakılsın; sertifikayı testssl değerlendiriyor.
+    run curl -sS -k -L --max-time "$timeout" -o /dev/null -D "$RUN_DIR/headers.txt" "${curl_proxy[@]}" "$url" \
         || warn "curl hata koduyla bitti ($?)."
     header_summary "$RUN_DIR/headers.txt" "$url"
 
@@ -764,7 +781,7 @@ cmd_web() {
             if is_ipv4 "$host"; then addr=$host; else addr=$(tor_resolve "$host") || exit 1; fi
             # testssl adresi kendisi çözünce DNS sorgusu Tor dışından gidiyor. Adresi
             # Tor üzerinden çözüp --ip ile veriyor, testssl'in DNS sorgularını kapatıyoruz.
-            run proxychains4 -f "$PROXYCHAINS_CONF" testssl "${tls_args[@]}" --ip "$addr" --nodns none "$url" \
+            run proxychains4 -q -f "$PROXYCHAINS_SLOW_CONF" testssl "${tls_args[@]}" --ip "$addr" --nodns none "$url" \
                 || warn "testssl hata koduyla bitti ($?)."
         else
             run testssl "${tls_args[@]}" "$url" || warn "testssl hata koduyla bitti ($?)."
@@ -982,7 +999,7 @@ cmd_schedule() {
             fi
             if [ "$1" = run ]; then
                 systemctl --user start --no-block "pisec-job-$name.service"
-                log "$name başlatıldı. Çıktı: journalctl --user -u pisec-job-$name"
+                log "$name başlatıldı. Çıktı: journalctl --user-unit pisec-job-$name"
             else
                 systemctl --user disable --now "pisec-job-$name.timer" >/dev/null 2>&1 || true
                 rm -f "$UNIT_DIR/pisec-job-$name.timer" "$UNIT_DIR/pisec-job-$name.service"
@@ -1043,6 +1060,7 @@ publish_start() {
     fi
     echo "$url" > "$STATE_DIR/publish-$port.url"
     log "Yayında: $url -> 127.0.0.1:$port"
+    log "Yeni adresin DNS'te görünmesi bir dakikayı bulabilir."
     log "Kapatmak için: pisec publish stop $port"
 }
 
@@ -1125,7 +1143,7 @@ RestartSec=10
 WantedBy=default.target
 EOF
             systemctl --user daemon-reload
-            systemctl --user enable --now "$unit" >/dev/null 2>&1 || die "Tünel başlatılamadı: journalctl --user -u $unit"
+            systemctl --user enable --now "$unit" >/dev/null 2>&1 || die "Tünel başlatılamadı: journalctl --user-unit $unit"
             log "Tünel çalışıyor. Hangi adresin nereye gideceğini Cloudflare Zero Trust panelinden ayarla."
             ;;
         stop)
