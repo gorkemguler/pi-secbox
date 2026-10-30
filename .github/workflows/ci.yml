@@ -1,4 +1,4 @@
-name: shellcheck
+name: ci
 
 on:
   push:
@@ -9,4 +9,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck setup.sh
+      - run: >
+          shellcheck setup.sh uninstall.sh pisec test/mock test/helpers.bash
+          panel/demo/run.sh panel/demo/bin/pisec panel/demo/bin/docker panel/demo/bin/fake-tool
+
+  bats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q bats
+      - run: bats test/
+
+  panel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q python3-flask python3-waitress
+      - run: /usr/bin/python3 -m unittest discover -s panel/tests -v
