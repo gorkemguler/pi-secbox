@@ -1,0 +1,9 @@
+.DS_Store
+Thumbs.db
+
+# tarama çıktıları
+*.log
+outputs/
+results/
+
+*.zip
