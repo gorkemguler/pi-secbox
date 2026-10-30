@@ -23,13 +23,19 @@ opt() {
 case $name in
     curl)
         hdr=$(opt -D "$@")
-        if [ -n "$hdr" ]; then
+        if [[ "$*" == *dns-query* ]]; then
+            echo '{"Status":0,"Answer":[{"name":"hedef.com","type":5,"data":"cdn.hedef.com."},{"name":"cdn.hedef.com","type":1,"data":"198.51.100.8"}]}'
+        elif [ -n "$hdr" ]; then
             printf 'HTTP/2 301\r\nlocation: https://www.hedef.com/\r\n\r\nHTTP/2 200\r\ncontent-type: text/html\r\nx-content-type-options: nosniff\r\nserver: nginx/1.24.0\r\n\r\n' > "$hdr"
         else
             echo '{"IsTor":true,"IP":"203.0.113.9"}'
         fi
         ;;
     tor-resolve)
+        if [ "${MOCK_RESOLVE:-}" = fail ]; then
+            echo "[err] Failed parsing SOCKS5 response" >&2
+            exit 1
+        fi
         echo "${MOCK_RESOLVE:-198.51.100.7}"
         ;;
     proxychains4)

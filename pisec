@@ -369,6 +369,13 @@ EOF
 tor_resolve() {
     local ip
     ip=$(tor-resolve "$1" "$SOCKS" 2>/dev/null) || ip=""
+    if ! is_ipv4 "$ip"; then
+        # tor-resolve bazı adlarda "Failed parsing SOCKS5 response" ile düşüyor. O zaman
+        # DNS-over-HTTPS sorgusu da Tor üzerinden gönderiliyor.
+        ip=$(curl -fsS --max-time 60 --proxy "socks5h://$TOR_USER:x@$SOCKS" -H 'accept: application/dns-json' \
+                "https://cloudflare-dns.com/dns-query?name=$1&type=A" 2>/dev/null \
+            | jq -r '[.Answer[]? | select(.type == 1) | .data][0] // empty' 2>/dev/null) || ip=""
+    fi
     is_ipv4 "$ip" || die "$1 Tor üzerinden çözülemedi."
     printf '%s\n' "$ip"
 }
@@ -778,15 +785,21 @@ cmd_web() {
         log "TLS ayarları kontrol ediliyor (testssl.sh, birkaç dakika sürebilir)"
         local tls_args=(--quiet --color 0 --warnings batch --jsonfile "$RUN_DIR/testssl.json" --logfile "$RUN_DIR/testssl.log")
         if [ "$USE_TOR" -eq 1 ]; then
-            if is_ipv4 "$host"; then addr=$host; else addr=$(tor_resolve "$host") || exit 1; fi
-            # testssl adresi kendisi çözünce DNS sorgusu Tor dışından gidiyor. Adresi
-            # Tor üzerinden çözüp --ip ile veriyor, testssl'in DNS sorgularını kapatıyoruz.
-            run proxychains4 -q -f "$PROXYCHAINS_SLOW_CONF" testssl "${tls_args[@]}" --ip "$addr" --nodns none "$url" \
-                || warn "testssl hata koduyla bitti ($?)."
+            if is_ipv4 "$host"; then addr=$host; else addr=$(tor_resolve "$host") || addr=""; fi
+            if [ -n "$addr" ]; then
+                # testssl adresi kendisi çözünce DNS sorgusu Tor dışından gidiyor. Adresi
+                # Tor üzerinden çözüp --ip ile veriyor, testssl'in DNS sorgularını kapatıyoruz.
+                run proxychains4 -q -f "$PROXYCHAINS_SLOW_CONF" testssl "${tls_args[@]}" --ip "$addr" --nodns none "$url" \
+                    || warn "testssl hata koduyla bitti ($?)."
+            fi
         else
             run testssl "${tls_args[@]}" "$url" || warn "testssl hata koduyla bitti ($?)."
         fi
-        testssl_summary "$RUN_DIR/testssl.json"
+        if [ "$USE_TOR" -eq 1 ] && [ -z "$addr" ]; then
+            note "" "## TLS (testssl.sh)" "" "- Atlandı: $host Tor üzerinden çözülemedi."
+        else
+            testssl_summary "$RUN_DIR/testssl.json"
+        fi
     fi
 
     if [ "$DO_NUCLEI" -eq 1 ]; then

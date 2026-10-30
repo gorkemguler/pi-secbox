@@ -157,6 +157,27 @@ setup() {
     not_called nmap
 }
 
+@test "tor-resolve düşerse adres Tor üzerinden DNS-over-HTTPS ile çözülür" {
+    export MOCK_RESOLVE=fail
+    run "$PISEC" scan hedef.com --tor -y
+    [ "$status" -eq 0 ]
+    calls curl | grep -q -- '--proxy socks5h://pisec[0-9]*:x@127.0.0.1:9050 .*cloudflare-dns.com/dns-query?name=hedef.com&type=A'
+    calls nmap | grep -q -- ' 198.51.100.8$'
+}
+
+@test "web Tor ile adres çözülemezse TLS adımını atlayıp devam eder" {
+    export MOCK_RESOLVE=fail
+    export PATH="$MOCK_DIR/nodoh:$PATH"
+    mkdir -p "$MOCK_DIR/nodoh"
+    printf '#!/usr/bin/env bash\nif [[ "$*" == *dns-query* ]]; then exit 22; fi\nexec %s "$@"\n' "$MOCK_DIR/bin/curl" > "$MOCK_DIR/nodoh/curl"
+    chmod +x "$MOCK_DIR/nodoh/curl"
+    run "$PISEC" web https://hedef.com --tor -y
+    [ "$status" -eq 0 ]
+    not_called testssl
+    calls nuclei >/dev/null
+    [[ $(latest_summary) == *"Atlandı: hedef.com Tor üzerinden çözülemedi."* ]]
+}
+
 @test "Tor ile özel adrese çözülen alan adı reddedilir" {
     export MOCK_RESOLVE=10.1.2.3
     run "$PISEC" scan ic.hedef.com --tor -y

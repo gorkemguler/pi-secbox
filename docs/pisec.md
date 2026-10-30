@@ -35,7 +35,7 @@ pisec web https://hedef.com --no-nuclei   # sadece başlıklar ve TLS
 | | Tor'suz | `--tor` ile |
 |---|---|---|
 | nmap | `-sV -T4 --top-ports 1000` | proxychains üzerinden `-sT -Pn -n --top-ports 100`; ham soket isteyen seçenekler (`-sS`, `-sU`, `-O`, ping) reddedilir |
-| Alan adı çözümü | yerel DNS | `tor-resolve` ile Tor üzerinden; nmap'e ve testssl'e IP verilir |
+| Alan adı çözümü | yerel DNS | `tor-resolve` ile Tor üzerinden, o olmazsa Tor üzerinden DNS-over-HTTPS; nmap'e ve testssl'e IP verilir |
 | testssl.sh | doğrudan | proxychains üzerinden, `--ip` ve `--nodns none` ile; testssl kendi DNS sorgusunu yapmaz |
 | nuclei | tüm şablonlar | sadece HTTP şablonları (`-pt http`), interactsh kapalı (`-ni`), SOCKS5 proxy |
 | subfinder, httpx | doğrudan | SOCKS5 proxy; subfinder'ın crt.sh kaynağı kapalı (veritabanına proxy'siz bağlanıyor) |
