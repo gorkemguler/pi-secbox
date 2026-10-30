@@ -1,0 +1,1 @@
+{"id": "20261030-141032-c3d4", "label": "scan scanme.nmap.org (Tor)", "argv": ["pisec", "scan", "scanme.nmap.org", "--tor"], "pid": 1, "status": "done", "started": "2026-10-30 14:10:32", "finished": "2026-10-30 14:12:05", "rc": 0, "run": {"target": "scanme.nmap.org", "run": "20261030-141032-scan"}}

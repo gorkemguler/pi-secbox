@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Panel demosu için sahte araçlar: Sistem sayfasındaki sürüm tablosu ve servis
+# durumları için. Her araç bu dosyaya bağlanan bir sembolik bağlantı.
+case "$(basename "$0")" in
+    nmap)        echo "Nmap version 7.95 ( https://nmap.org )" ;;
+    nuclei)      echo "[INF] Nuclei Engine Version: v3.11.1" >&2 ;;
+    subfinder)   echo "[INF] Current Version: v2.17.0" >&2 ;;
+    httpx)       echo "[INF] Current Version: v1.12.0" >&2 ;;
+    dnsx)        echo "[INF] Current Version: 1.3.1" >&2 ;;
+    naabu)       echo "[INF] Current Version: 2.7.0" >&2 ;;
+    tor)         echo "Tor version 0.4.9.15." ;;
+    testssl)     echo "testssl.sh version 3.2.4 from https://testssl.sh/" ;;
+    cloudflared) echo "cloudflared version 2026.10.0 (built 2026-10-08)" ;;
+    systemctl)
+        if [ "$1" = --user ]; then echo active; exit 0; fi
+        shift
+        for _ in "$@"; do echo active; done
+        ;;
+    curl)        echo '{"IsTor":true,"IP":"198.51.100.23"}' ;;
+esac

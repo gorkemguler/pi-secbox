@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_macros.html" import badge, meter, runs_table %}
+{% block title %}Genel bakış{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>Genel bakış</h1>
+  <a class="button primary" href="{{ url_for('panel.jobs_page') }}">Yeni tarama</a>
+</header>
+
+<section class="grid cards">
+  <div class="card stat">
+    <div class="label">Sistem</div>
+    <div class="value">{{ info.host }}</div>
+    <div class="muted small">açık: {{ info.uptime }} · yük: {{ info.load }}</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Sıcaklık</div>
+    <div class="value">{{ info.temp }}</div>
+    <div class="muted small">CPU</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Bellek</div>
+    <div class="value small-value">{{ info.mem }}</div>
+    {{ meter(info.mem_pct) }}
+  </div>
+  <div class="card stat">
+    <div class="label">Disk</div>
+    <div class="value small-value">{{ info.disk }}</div>
+    {{ meter(info.disk_pct) }}
+  </div>
+  <div class="card stat">
+    <div class="label">Tor çıkış IP'si</div>
+    <div class="value mono" data-tor-ip>…</div>
+    <div class="muted small">check.torproject.org</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Servisler</h2>
+  <div class="services">
+    {% for name, label in [("tor@default", "Tor"), ("ufw", "ufw"), ("fail2ban", "fail2ban"), ("docker", "Docker"), ("cloudflare-tunnel", "Cloudflare tüneli")] %}
+    <div class="service"><span>{{ label }}</span>{{ badge(services[name]) }}</div>
+    {% endfor %}
+  </div>
+</section>
+
+<div class="grid two">
+  <section class="card">
+    <h2>İşler</h2>
+    {% if jobs %}
+    <ul class="list">
+      {% for j in jobs %}
+      <li><a href="{{ url_for('panel.job_page', jid=j.id) }}">{{ j.label }}</a>
+        <span class="muted small mono">{{ j.started[11:16] }}</span>{{ badge(j.status) }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="muted">Panelden başlatılmış iş yok.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Zamanlanmış görevler</h2>
+    {% if schedules %}
+    <ul class="list">
+      {% for s in schedules %}
+      <li><span class="mono">{{ s.command }}</span><span class="muted small">{{ s.next or s.when }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="muted">Görev yok. <a href="{{ url_for('panel.schedules_page') }}">Ekle</a></p>{% endif %}
+  </section>
+</div>
+
+<section class="card">
+  <h2>Son taramalar</h2>
+  {{ runs_table(runs) }}
+</section>
+{% endblock %}

@@ -1,0 +1,3 @@
+subfinder -d hedef.com -silent -o .../subdomains.txt 
+dnsx -l .../subdomains.txt -silent -a -resp -o .../dns.txt 
+httpx -l .../subdomains.txt -silent -nc -sc -title -td -o .../web.txt 

@@ -1,0 +1,1 @@
+{"id": "20261030-142210-a1b2", "label": "web https://hedef.com (Tor)", "argv": ["pisec", "web", "https://hedef.com", "--tor"], "pid": 1, "status": "done", "started": "2026-10-30 14:22:10", "finished": "2026-10-30 14:31:47", "rc": 0, "run": {"target": "hedef.com", "run": "20261030-142210-web"}}

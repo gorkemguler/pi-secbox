@@ -1,0 +1,32 @@
+{% macro badge(state) -%}
+<span class="badge {{ state | status_class }}">{{ state | status_text }}</span>
+{%- endmacro %}
+
+{# CSP satır içi stile izin vermediği için doluluk çubuğu SVG öznitelikleriyle çiziliyor. #}
+{% macro meter(pct) -%}
+<svg class="meter {{ 'hot' if pct >= 85 }}" viewBox="0 0 100 6" preserveAspectRatio="none" aria-label="%{{ pct }}">
+  <rect class="track" width="100" height="6" rx="3"/><rect class="fill" width="{{ pct }}" height="6" rx="3"/>
+</svg>
+{%- endmacro %}
+
+{% macro runs_table(runs) -%}
+{% if runs %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Tarih</th><th>Hedef</th><th>Komut</th><th></th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td class="mono">{{ r.date }}</td>
+    <td><a href="{{ url_for('panel.run_page', target=r.target, run=r.run) }}">{{ r.label }}</a></td>
+    <td><span class="tag">{{ r.cmd }}</span></td>
+    <td>{% if r.tor %}<span class="tag tor">Tor</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="muted">Henüz kayıtlı sonuç yok.</p>
+{% endif %}
+{%- endmacro %}

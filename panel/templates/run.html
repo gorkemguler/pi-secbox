@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ target }} · {{ info.cmd }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <p class="crumbs"><a href="{{ url_for('panel.results_page') }}">Sonuçlar</a> / <a href="{{ url_for('panel.results_page', target=target) }}">{{ info.label }}</a></p>
+    <h1>{{ info.label }} <span class="tag">{{ info.cmd }}</span>{% if info.tor %} <span class="tag tor">Tor</span>{% endif %}</h1>
+    <p class="muted small mono">{{ info.date }}</p>
+  </div>
+</header>
+
+<div class="grid run-grid">
+  <article class="card summary">{{ summary }}</article>
+  <aside class="card">
+    <h2>Dosyalar</h2>
+    <ul class="list files">
+      {% for f in files %}
+      <li>
+        <a href="{{ url_for('panel.run_file', target=target, run=run, name=f.name) }}" target="_blank" rel="noopener">{{ f.name }}</a>
+        <span class="muted small">{{ f.size }}</span>
+        <a class="small" href="{{ url_for('panel.run_file', target=target, run=run, name=f.name, download=1) }}">indir</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </aside>
+</div>
+{% endblock %}

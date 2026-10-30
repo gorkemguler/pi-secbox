@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Kapsam{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Kapsam</h1></header>
+
+<section class="card">
+  <p>pisec sadece bu listedeki hedefleri onay sormadan tarıyor. Alan adı kendi alt alan adlarını da kapsar,
+    ağ (CIDR) içindeki her adresi kapsar. Zamanlanmış görevler ve panelden başlatılan taramalar listede
+    olmayan hedefe hiç başlamaz.</p>
+  {% if entries %}
+  <ul class="list">
+    {% for e in entries %}
+    <li>
+      <span class="mono">{{ e }}</span>
+      <form method="post" class="inline" data-confirm="{{ e }} kapsamdan çıkarılsın mı?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="action" value="rm">
+        <input type="hidden" name="target" value="{{ e }}">
+        <button class="link danger-text small">çıkar</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">Liste boş.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Hedef ekle</h2>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="add">
+    <label>Hedef<input name="target" placeholder="hedef.com, 203.0.113.0/24" required autocomplete="off"></label>
+    <label class="check"><input type="checkbox" name="permission" value="1" required> Bu hedefi test etme iznim var</label>
+    <div class="actions"><button class="primary">Ekle</button></div>
+  </form>
+</section>
+{% endblock %}

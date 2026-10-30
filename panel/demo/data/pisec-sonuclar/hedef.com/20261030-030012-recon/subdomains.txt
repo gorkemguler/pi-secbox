@@ -1,0 +1,14 @@
+hedef.com
+www.hedef.com
+api.hedef.com
+panel.hedef.com
+staging.hedef.com
+status.hedef.com
+mail.hedef.com
+cdn.hedef.com
+vpn.hedef.com
+dev.hedef.com
+ftp.hedef.com
+m.hedef.com
+docs.hedef.com
+blog.hedef.com

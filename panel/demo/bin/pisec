@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Panel demosu ve testleri için sahte pisec. Hiçbir aracı çalıştırmaz, ağa
+# çıkmaz; panelin beklediği biçimde örnek çıktı verir.
+#
+case "$1 ${2:-}" in
+    "schedule list")
+        cat <<'EOF'
+[
+  {"name": "recon-hedef.com", "when": "*-*-* 03:00:00", "command": "recon hedef.com", "next": "Fri 2026-10-31 03:00:41 +03", "last": "Thu 2026-10-30 03:00:12 +03"},
+  {"name": "scan-hedef.com", "when": "Mon *-*-* 03:00:00", "command": "scan hedef.com --tor", "next": "Mon 2026-11-02 03:00:27 +03", "last": "Mon 2026-10-26 03:00:51 +03"},
+  {"name": "lan-192.168.1.0-24", "when": "hourly", "command": "lan 192.168.1.0/24", "next": "Thu 2026-10-30 15:00:00 +03", "last": "Thu 2026-10-30 14:00:03 +03"}
+]
+EOF
+        ;;
+    "schedule add"|"schedule rm"|"schedule run")
+        echo "[+] Tamam: $*"
+        ;;
+    "scope "|"scope list")
+        printf '%s\n' hedef.com 203.0.113.0/24 192.168.1.0/24 scanme.nmap.org
+        ;;
+    "scope check")
+        case $3 in
+            hedef.com|*.hedef.com|https://hedef.com*|http://hedef.com*|203.0.113.*|192.168.1.*|scanme.nmap.org)
+                echo "$3 kapsamda." ;;
+            *)
+                echo "$3 kapsam listesinde yok."; exit 1 ;;
+        esac
+        ;;
+    "scope add"|"scope rm")
+        echo "[+] $3 tamam."
+        ;;
+    "publish list")
+        echo '[{"port": 8081, "url": "https://quiet-river-ample-tide.trycloudflare.com"}]'
+        ;;
+    "publish stop")
+        echo "[+] $3 yayından kaldırıldı."
+        ;;
+    "publish "[0-9]*)
+        echo "[+] Yayında: https://bright-moon-solid-wave.trycloudflare.com -> 127.0.0.1:$2"
+        ;;
+    "tunnel status")
+        printf 'Token: kayıtlı\nTünel: active\n'
+        ;;
+    "tunnel "*)
+        echo "[+] tamam"
+        ;;
+    "notify "*)
+        echo "Bildirimler açık: https://ntfy.sh/pisec-a8f3k2"
+        ;;
+    "tor new")
+        echo "[+] Yeni devre istendi."
+        ;;
+    "scan "*|"recon "*|"web "*|"lan "*)
+        target=${2:-192.168.1.0/24}
+        safe=${target//\//_}
+        safe=${safe#https://}
+        out="$PISEC_OUT/$safe/$(date +%Y%m%d-%H%M%S)-$1"
+        mkdir -p "$out"
+        step() { echo "$1"; sleep "${DEMO_DELAY:-0}"; }
+        step "[+] Tor çıkış IP'si: 198.51.100.23"
+        echo "[+] Sonuçlar: $out"
+        step "Starting Nmap 7.95 ( https://nmap.org ) at $(date '+%Y-%m-%d %H:%M') +03"
+        step "Nmap scan report for 203.0.113.10"
+        step "Host is up (0.21s latency)."
+        step "Not shown: 97 closed tcp ports (conn-refused)"
+        step "PORT    STATE SERVICE"
+        step "22/tcp  open  ssh"
+        step "80/tcp  open  http"
+        step "443/tcp open  https"
+        step ""
+        step "Nmap done: 1 IP address (1 host up) scanned in 41.27 seconds"
+        printf '# pisec %s: %s\n\n- Tarih: %s\n- Kapsam: listede\n- Tor: hayır\n\n## Açık portlar\n\n| Adres | Port | Servis | Sürüm |\n|---|---|---|---|\n| 203.0.113.10 | 22/tcp | ssh |  |\n' \
+            "$1" "$target" "$(date '+%Y-%m-%d %H:%M:%S')" > "$out/ozet.md"
+        echo "[+] Kaydedildi: $out"
+        ;;
+    *)
+        echo "sahte pisec: $*"
+        ;;
+esac

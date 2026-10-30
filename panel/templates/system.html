@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Sistem{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Sistem</h1></header>
+
+<div class="grid two">
+  <section class="card">
+    <h2>İşlemler</h2>
+    <p class="muted small">Panelde serbest komut satırı yok; sadece bu işlemler çalıştırılabiliyor.
+      Kabuk gerekiyorsa SSH ya da Raspberry Pi Connect kullan.</p>
+    <form method="post" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button name="action" value="tor-new">Tor'dan yeni devre iste</button>
+      <button name="action" value="update-tools">ProjectDiscovery araçlarını güncelle</button>
+      <button name="action" value="update-templates">nuclei şablonlarını güncelle</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Araç sürümleri</h2>
+    <table class="compact">
+      <tbody>
+      {% for name, ver in versions %}
+      <tr><td>{{ name }}</td><td class="mono {{ 'muted' if ver in ('yok', '?') }}">{{ ver }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<div class="grid two">
+  <section class="card">
+    <h2>Bildirimler</h2>
+    <p class="muted small">Tarama bitince <a href="https://ntfy.sh" target="_blank" rel="noopener noreferrer">ntfy</a>
+      ile telefona bildirim. Uygulamada bir konuya abone ol, adresini buraya yaz. Konu adını tahmin edilmesi zor seç;
+      ntfy.sh'ta konuyu bilen herkes mesajları okuyabilir.</p>
+    <p class="small">{{ notify }}</p>
+    <form method="post" class="form-grid">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="wide">ntfy adresi<input name="ntfy" placeholder="https://ntfy.sh/pisec-a8f3k2" autocomplete="off"></label>
+      <div class="actions">
+        <button name="action" value="notify-set" class="primary">Kaydet</button>
+        <button name="action" value="notify-test">Deneme gönder</button>
+      </div>
+    </form>
+  </section>
+
+  {% if not demo %}
+  <section class="card">
+    <h2>Panel parolası</h2>
+    <form method="post" class="form-grid">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="password">
+      <label class="wide">Mevcut parola<input type="password" name="current" autocomplete="current-password" required></label>
+      <label>Yeni parola<input type="password" name="new" minlength="10" autocomplete="new-password" required></label>
+      <label>Tekrar<input type="password" name="repeat" minlength="10" autocomplete="new-password" required></label>
+      <div class="actions"><button class="primary">Değiştir</button></div>
+    </form>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

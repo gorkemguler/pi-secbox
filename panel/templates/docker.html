@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Docker{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Docker</h1>{% if ok %}<span class="muted small">Docker {{ info }}</span>{% endif %}</header>
+
+{% if not ok %}
+<section class="card warn-card"><p class="pre">{{ info }}</p></section>
+{% else %}
+
+<section class="card">
+  <h2>Uygulamalar</h2>
+  <p class="muted small">~/pisec-apps altındaki compose projeleri. Portlar 127.0.0.1'e bağlı; dışarıdan erişim için Yayınla'yı kullan.</p>
+  {% if apps %}
+  <ul class="list">
+    {% for a in apps %}
+    <li>
+      <span class="mono">{{ a.name }}</span>
+      <span class="muted small">{% for p in a.ports %}127.0.0.1:{{ p }} {% endfor %}</span>
+      <span class="row-actions">
+        <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="app" value="{{ a.name }}">
+          <button name="action" value="up" class="small">Başlat</button>
+          <button name="action" value="down" class="small">Durdur</button></form>
+        <a class="button small" href="{{ url_for('panel.docker_logs', app=a.name) }}">Günlük</a>
+        {% for p in a.ports %}<a class="button small" href="{{ url_for('panel.publish_page', port=p) }}">Yayınla :{{ p }}</a>{% endfor %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">Uygulama yok.</p>{% endif %}
+
+  <details class="create">
+    <summary>Yeni uygulama</summary>
+    {% if compose %}
+    <form method="post" class="form-grid">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="create">
+      <label>Ad<input name="app" placeholder="blog" pattern="[a-z0-9][a-z0-9-]{0,30}" required autocomplete="off"></label>
+      <label class="wide">compose.yaml<textarea name="compose" rows="12" spellcheck="false">{{ template }}</textarea></label>
+      <div class="actions"><button class="primary">Oluştur</button></div>
+    </form>
+    {% else %}<p class="muted">docker compose bulunamadı.</p>{% endif %}
+  </details>
+</section>
+
+<section class="card">
+  <h2>Konteynerler</h2>
+  {% if containers %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Ad</th><th>İmaj</th><th>Durum</th><th>Portlar</th><th></th></tr></thead>
+    <tbody>
+    {% for c in containers %}
+    <tr>
+      <td class="mono">{{ c.Names }}</td>
+      <td class="mono small">{{ c.Image }}</td>
+      <td><span class="badge {{ c.State | status_class }}">{{ c.Status }}</span></td>
+      <td class="small mono">{{ c.Ports }}{% if c.exposed %} <span class="tag bad" title="Docker bu portu tüm arayüzlere açıyor ve ufw kuralları bunu engellemiyor">dışa açık</span>{% endif %}</td>
+      <td class="row-actions">
+        <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ c.ID }}">
+          {% if c.State == "running" %}
+          <button name="action" value="restart" class="small">Yeniden başlat</button>
+          <button name="action" value="stop" class="small">Durdur</button>
+          {% else %}
+          <button name="action" value="start" class="small">Başlat</button>
+          {% endif %}
+        </form>
+        <a class="button small" href="{{ url_for('panel.docker_logs', id=c.ID) }}">Günlük</a>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">Konteyner yok.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

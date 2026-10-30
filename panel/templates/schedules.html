@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Zamanlama{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Zamanlama</h1></header>
+
+<section class="card">
+  {% if schedules %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Ad</th><th>Zaman</th><th>Komut</th><th>Sonraki</th><th>Son</th><th></th></tr></thead>
+    <tbody>
+    {% for s in schedules %}
+    <tr>
+      <td class="mono">{{ s.name }}</td>
+      <td class="mono">{{ s.when }}</td>
+      <td class="mono">pisec {{ s.command }}</td>
+      <td class="small">{{ s.next or "-" }}</td>
+      <td class="small">{{ s.last or "-" }}</td>
+      <td class="row-actions">
+        <form method="post" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="name" value="{{ s.name }}">
+          <button name="action" value="run" class="small">Şimdi çalıştır</button>
+        </form>
+        <form method="post" class="inline" data-confirm="{{ s.name }} silinsin mi?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="name" value="{{ s.name }}">
+          <button name="action" value="rm" class="small danger">Sil</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">Zamanlanmış görev yok.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Görev ekle</h2>
+  <p class="muted small">Görevler systemd zamanlayıcısıyla çalışıyor; Pi kapalıyken kaçan çalıştırma açılışta yapılır.
+    Sonuçlar normal taramalar gibi Sonuçlar sayfasına düşer. Bildirim ayarlıysa her çalıştırmanın özeti telefona gelir.</p>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="add">
+    <label>Ne zaman
+      <select name="when" id="when">
+        {% for value, label in presets %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+        <option value="custom">Özel (systemd OnCalendar)</option>
+      </select>
+    </label>
+    <label id="when-custom-row">OnCalendar ifadesi
+      <input name="when_custom" placeholder="Sat *-*-* 04:30:00" autocomplete="off">
+    </label>
+    <label>Komut
+      <select name="cmd">
+        <option value="recon">Alt alan adı keşfi</option>
+        <option value="scan">Port taraması</option>
+        <option value="web">Web denetimi</option>
+        <option value="lan">Yerel ağ</option>
+      </select>
+    </label>
+    <label>Hedef
+      <input name="target" list="scope-list" required autocomplete="off" placeholder="kapsam listesinden">
+      <datalist id="scope-list">{% for e in scope %}<option value="{{ e }}">{% endfor %}</datalist>
+    </label>
+    <label>Ad (isteğe bağlı)<input name="name" placeholder="gunluk-recon" autocomplete="off"></label>
+    <label class="check"><input type="checkbox" name="tor" value="1"> Tor üzerinden</label>
+    <div class="actions"><button class="primary">Ekle</button></div>
+  </form>
+</section>
+{% endblock %}

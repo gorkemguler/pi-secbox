@@ -1,0 +1,1 @@
+{"id": "20261029-210944-9c8d", "label": "recon ornek.org", "argv": ["pisec", "recon", "ornek.org"], "pid": 1, "status": "failed", "started": "2026-10-29 21:09:44", "finished": "2026-10-29 21:09:45", "rc": 1, "run": null}

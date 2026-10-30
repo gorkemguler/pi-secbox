@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% from "_macros.html" import badge %}
+{% block title %}Taramalar{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Taramalar</h1></header>
+
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+{% if scope_missing %}
+<section class="card warn-card">
+  <h2>{{ scope_missing }} kapsam listesinde yok</h2>
+  <p>pisec sadece kapsam listesindeki hedefleri tarıyor. Bu hedefi test etme iznin varsa listeye ekle, sonra taramayı yeniden başlat.</p>
+  <form method="post" action="{{ url_for('panel.scope_page') }}" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="target" value="{{ scope_missing }}">
+    <input type="hidden" name="back" value="{{ url_for('panel.jobs_page', cmd=form.get('cmd'), target=form.get('target'), tor=form.get('tor'), ports=form.get('ports')) }}">
+    <label class="check"><input type="checkbox" name="permission" value="1" required> Bu hedefi test etme iznim var</label>
+    <button class="primary">Kapsama ekle</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Yeni tarama</h2>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Komut
+      <select name="cmd" id="cmd">
+        {% for value, label in [("scan", "Port taraması (nmap)"), ("recon", "Alt alan adı keşfi"), ("web", "Web denetimi"), ("lan", "Yerel ağ")] %}
+        <option value="{{ value }}" {{ 'selected' if form.get('cmd') == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Hedef
+      <input name="target" value="{{ form.get('target', '') }}" placeholder="hedef.com, 203.0.113.10, https://hedef.com" autocomplete="off">
+      <span class="hint" data-for="lan">Boş bırakılırsa bağlı olunan ağ taranır.</span>
+    </label>
+    <label data-for="scan">Portlar
+      <input name="ports" value="{{ form.get('ports', '') }}" placeholder="boş: en sık kullanılanlar" autocomplete="off">
+    </label>
+    <label data-for="web">nuclei önem seviyesi
+      <select name="severity">
+        <option value="">low ve üstü</option>
+        <option value="medium,high,critical">medium ve üstü</option>
+        <option value="high,critical">high ve üstü</option>
+        <option value="info,low,medium,high,critical">hepsi (info dahil)</option>
+      </select>
+    </label>
+    <label class="check" data-for="scan recon web"><input type="checkbox" name="tor" value="1" {{ 'checked' if form.get('tor') }}> Tor üzerinden</label>
+    <div class="actions"><button class="primary">Başlat</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Geçmiş</h2>
+  {% if jobs %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Başlangıç</th><th>İş</th><th>Durum</th><th></th></tr></thead>
+    <tbody>
+    {% for j in jobs %}
+    <tr>
+      <td class="mono">{{ j.started }}</td>
+      <td><a href="{{ url_for('panel.job_page', jid=j.id) }}">{{ j.label }}</a></td>
+      <td>{{ badge(j.status) }}</td>
+      <td>{% if j.run %}<a href="{{ url_for('panel.run_page', target=j.run.target, run=j.run.run) }}">sonuç</a>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">Henüz iş yok.</p>{% endif %}
+</section>
+{% endblock %}

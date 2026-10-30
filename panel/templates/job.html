@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ job.label }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>{{ job.label }}</h1>
+    <p class="muted small">Başladı: {{ job.started }}{% if job.finished %} · Bitti: {{ job.finished }}{% endif %}</p>
+  </div>
+  <div class="head-actions">
+    <span id="job-status" class="badge {{ job.status | status_class }}">{{ job.status | status_text }}</span>
+    {% if job.status == "running" %}
+    <form method="post" action="{{ url_for('panel.job_stop', jid=job.id) }}" id="job-stop" data-confirm="İş durdurulsun mu?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger">Durdur</button>
+    </form>
+    {% endif %}
+  </div>
+</header>
+
+<p class="mono small muted cmdline">{{ job.argv | cmdline }}</p>
+
+<div id="job-result" class="flash ok" {{ 'hidden' if not job.run }}>Bitti. <a href="{{ url_for('panel.run_page', target=job.run.target, run=job.run.run) if job.run else '#' }}">Sonuçları aç</a></div>
+
+<pre class="terminal" id="joblog" data-job="{{ job.id }}"></pre>
+{% endblock %}

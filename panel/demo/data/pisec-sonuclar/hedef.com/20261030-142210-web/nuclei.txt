@@ -1,0 +1,1 @@
+[git-config] [http] [medium] https://hedef.com/.git/config

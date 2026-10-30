@@ -1,0 +1,8 @@
+HTTP/2 200
+server: nginx/1.24.0
+content-type: text/html
+strict-transport-security: max-age=31536000
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+referrer-policy: strict-origin
+

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Yayınla{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Yayınla</h1></header>
+
+{% if not cloudflared %}
+<section class="card warn-card">
+  <p>cloudflared kurulu değil. Kurmak için Pi'de: <code>./setup.sh --with-cloudflared</code></p>
+</section>
+{% else %}
+
+<section class="card">
+  <h2>Geçici adres</h2>
+  <p class="muted small">Pi'de çalışan bir web uygulamasını, hesap gerektirmeyen rastgele bir
+    <code>trycloudflare.com</code> adresinden açar. Modemde port açmaya gerek yok. Adresi bilen herkes
+    erişebilir; deneme ve kısa süreli paylaşım için.</p>
+
+  {% if published %}
+  <ul class="list">
+    {% for p in published %}
+    <li>
+      <a href="{{ p.url }}" target="_blank" rel="noopener noreferrer" class="mono">{{ p.url }}</a>
+      <span class="muted small">→ 127.0.0.1:{{ p.port }}</span>
+      <form method="post" class="inline" data-confirm="Yayın kapatılsın mı?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="action" value="stop">
+        <input type="hidden" name="port" value="{{ p.port }}">
+        <button class="small danger">Kapat</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="publish">
+    <label>Yerel port
+      <input name="port" value="{{ port }}" list="app-ports" inputmode="numeric" pattern="[0-9]{1,5}" required autocomplete="off" placeholder="8081">
+      <datalist id="app-ports">{% for a in apps %}{% for p in a.ports %}<option value="{{ p }}">{{ a.name }}</option>{% endfor %}{% endfor %}</datalist>
+    </label>
+    <label class="check"><input type="checkbox" name="confirm" value="1" required> Adresin herkese açık olacağını biliyorum</label>
+    <div class="actions"><button class="primary">Yayınla</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Kalıcı tünel</h2>
+  <p class="muted small">Kendi alan adınla kalıcı yayın ve paneli dışarıdan açmak için. Cloudflare Zero Trust'ta
+    bir tünel oluştur, token'ı buraya yapıştır, hangi alt alan adının Pi'deki hangi porta gideceğini Cloudflare
+    panelinden ayarla. Paneli bu yolla açacaksan önüne mutlaka Cloudflare Access koy (docs/panel.md).</p>
+  <pre class="terminal short">{{ tunnel }}</pre>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="token">
+    <label class="wide">Tünel token'ı<input type="password" name="token" autocomplete="off" required></label>
+    <div class="actions"><button>Token'ı kaydet</button></div>
+  </form>
+  <form method="post" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button name="action" value="tunnel-start" class="primary">Başlat</button>
+    <button name="action" value="tunnel-stop">Durdur</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
