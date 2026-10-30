@@ -17,7 +17,7 @@ PROXYCHAINS_CONF="/etc/proxychains4.conf"
 CHEATSHEET="$HOME/pisecbox-cheatsheet.md"
 PANEL_DIR="/usr/local/lib/pisec-panel"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-CLOUDFLARE_KEY="/usr/share/keyrings/cloudflare-public-v2.gpg"
+CLOUDFLARE_KEY="/usr/share/keyrings/cloudflare-main.gpg"
 CLOUDFLARE_LIST="/etc/apt/sources.list.d/cloudflared.list"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -94,7 +94,7 @@ SUDO_KEEPALIVE_PID=$!
 if [ "$WITH_CLOUDFLARED" -eq 1 ] && [ ! -f "$CLOUDFLARE_LIST" ]; then
     log "Cloudflare apt deposu ekleniyor"
     sudo install -d -m 755 /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee "$CLOUDFLARE_KEY" >/dev/null
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee "$CLOUDFLARE_KEY" >/dev/null
     echo "deb [signed-by=$CLOUDFLARE_KEY] https://pkg.cloudflare.com/cloudflared any main" \
         | sudo tee "$CLOUDFLARE_LIST" >/dev/null
 fi
