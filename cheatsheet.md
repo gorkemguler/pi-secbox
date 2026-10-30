@@ -5,13 +5,40 @@ Okumak için: `less ~/pisecbox-cheatsheet.md`
 
 `hedef.com` gördüğün her yerde, sahibi olduğun ya da test izni aldığın bir hedef kullan.
 
+## pisec
+
+Aşağıdaki araçların çoğunu doğru bayraklarla tek komuttan çalıştırır, sonuçları
+`~/pisec-sonuclar` altına kaydeder.
+
+```bash
+pisec                                   # menü
+pisec scope add hedef.com               # izinli hedef listesine ekle
+pisec tor status                        # Tor durumu ve çıkış IP'si
+pisec tor new                           # yeni devre
+pisec lan                               # yerel ağdaki cihazlar
+pisec scan hedef.com [--tor]            # port taraması
+pisec scan hedef.com -p 22,80 -- -sC    # belirli portlar, ek nmap seçenekleri
+pisec recon hedef.com [--tor]           # alt alan adları, canlı web servisleri
+pisec web https://hedef.com [--tor]     # başlıklar, testssl, nuclei
+pisec results hedef.com                 # son özet
+pisec schedule add daily recon hedef.com    # her gece keşif
+pisec schedule                          # zamanlanmış görevler
+pisec notify set https://ntfy.sh/<konu> # tarama bitince telefona bildirim
+pisec publish 8081                      # 127.0.0.1:8081'i geçici bir adresten aç
+pisec publish stop 8081
+pisec panel                             # web paneli durumu
+```
+
+Panel Pi'de `127.0.0.1:8090`'da. Başka bir bilgisayardan açmak için:
+`ssh -L 8090:127.0.0.1:8090 kullanici@pisecbox.local`, sonra tarayıcıda `http://localhost:8090`.
+
 ## Tor
 
 ```bash
 systemctl status tor@default                                  # asıl Tor süreci ("tor" servisi sadece sarmalayıcı)
 curl -s https://check.torproject.org/api/ip                   # kendi IP'n
 proxychains4 -q curl -s https://check.torproject.org/api/ip   # Tor çıkış IP'si, "IsTor":true görmelisin
-sudo systemctl restart tor                                    # yeni devreler, büyük ihtimalle yeni çıkış IP'si
+pisec tor new                                                 # yeni devreler, büyük ihtimalle yeni çıkış IP'si
 ```
 
 Tor sadece TCP taşır. UDP, ICMP ve ham soket kullanan her şey (ping, `nmap -sS`,
@@ -69,7 +96,13 @@ proxychains4 -q curl -sI https://hedef.com
 ```
 
 testssl, adres çözümlemesi için `dig`/`host` kullandığından proxychains ile birlikte
-DNS sorguları Tor dışına çıkar. Gizlilik önemliyse testssl'i Tor üzerinden çalıştırma.
+DNS sorguları Tor dışına çıkar. Tor üzerinden çalıştırmak için adresi önce Tor'dan çöz
+ve testssl'in DNS sorgularını kapat (`pisec web --tor` bunu yapıyor):
+
+```bash
+ip=$(tor-resolve hedef.com)
+proxychains4 -q testssl --ip "$ip" --nodns none https://hedef.com
+```
 
 ## Araçları güncel tutmak
 
@@ -78,6 +111,7 @@ pdtm -ua                         # ProjectDiscovery araçları
 nuclei -ut                       # nuclei şablonları (git ile kurulduysa: git -C ~/nuclei-templates pull)
 sudo git -C /opt/testssl.sh pull # testssl.sh
 sudo apt update && sudo apt full-upgrade
+cd ~/pi-secbox && git pull && ./setup.sh --no-upgrade   # pisec ve betiklerin yeni sürümü
 ```
 
 ## Güvenlik duvarı ve fail2ban

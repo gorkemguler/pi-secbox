@@ -1,0 +1,1270 @@
+#!/usr/bin/env bash
+#
+# pisec: pi-secbox araçlarını tek komuttan kullanmak için.
+# Tor ayarlarını, sonuç klasörlerini, izinli hedef (kapsam) kontrolünü,
+# zamanlanmış taramaları ve Cloudflare ile yayınlamayı üstlenir.
+#
+set -euo pipefail
+
+VERSION="0.2.0"
+
+CONF_DIR="${PISEC_CONF_DIR:-$HOME/.config/pisec}"
+CONFIG_FILE="$CONF_DIR/config"
+SCOPE_FILE="${PISEC_SCOPE:-$CONF_DIR/kapsam}"
+OUT_ROOT="${PISEC_OUT:-$HOME/pisec-sonuclar}"
+STATE_DIR="${PISEC_STATE:-$HOME/.local/state/pisec}"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+PANEL_DIR="${PISEC_PANEL_DIR:-/usr/local/lib/pisec-panel}"
+SOCKS="${PISEC_SOCKS:-127.0.0.1:9050}"
+TOR_CONTROL="${PISEC_TOR_CONTROL:-/run/tor/control}"
+TOR_COOKIE="${PISEC_TOR_COOKIE:-/run/tor/control.authcookie}"
+CHECK_URL="https://check.torproject.org/api/ip"
+DEFAULT_SEVERITY="low,medium,high,critical"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+USE_TOR=0
+ASSUME_YES=0
+JSON_OUT=0
+NAME=""
+PORTS=""
+TOP=""
+SERVICE_VERSIONS=0
+SEVERITY="$DEFAULT_SEVERITY"
+DO_NUCLEI=1
+DO_TLS=1
+
+TMP_DIR=""
+RUN_DIR=""
+RUN_TITLE=""
+SCOPE_NOTE=""
+TOR_EXIT_IP=""
+TOR_USER=""
+PROXY_URL=""
+PROXYCHAINS_CONF=""
+HIGHLIGHTS=()
+
+log()  { printf '[+] %s\n' "$*"; }
+warn() { printf '[!] %s\n' "$*" >&2; }
+die()  { printf '[x] %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+    if [ -n "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Kullanım: pisec <komut> [seçenekler]
+
+Tarama:
+  lan [ağ]                   yerel ağdaki cihazlar (varsayılan: bağlı olunan ağ)
+  scan <hedef> [-- nmap seçenekleri]
+                             nmap port taraması
+  recon <alan-adı>           alt alan adları ve canlı web servisleri
+  web <url>                  HTTP başlıkları, testssl.sh ve nuclei
+  results [hedef]            kayıtlı sonuçlar
+
+Tor:
+  tor status                 Tor servisi, çıkış IP'si ve kontrol soketi
+  tor new                    Tor'dan yeni devre iste
+
+Yönetim:
+  scope [add|rm|check <hedef>]
+                             izinli hedef listesi
+  schedule [list|add|rm|run] zamanlanmış taramalar (systemd timer)
+  notify [set <url>|off|test]
+                             tarama bitince ntfy ile bildirim
+  publish <port>             yerel bir portu geçici bir trycloudflare.com adresinden aç
+  publish [list|stop <port>]
+  tunnel [token|start|stop]  Cloudflare hesabına bağlı kalıcı tünel
+  panel [start|stop|passwd]  web paneli
+
+Seçenekler:
+  --tor                      trafiği Tor üzerinden geçir (scan, recon, web)
+  -p, --ports LİSTE          taranacak portlar, ör. 22,80,443 ya da 1-1024 (scan)
+  --top N                    en sık kullanılan N port (scan; varsayılan 1000, Tor'la 100)
+  --sv                       Tor üzerinden taramada servis sürümlerini de bul (scan)
+  -s, --severity LİSTE       nuclei önem seviyeleri (web; varsayılan low,medium,high,critical)
+  --no-nuclei                web denetiminde nuclei'yi atla
+  --no-tls                   web denetiminde testssl.sh'ı atla
+  --name AD                  zamanlanmış görevin adı (schedule add)
+  --json                     listeleri JSON olarak ver (schedule, publish)
+  -y, --yes                  onay sorma
+  -h, --help                 bu yardımı göster
+      --version              sürümü göster
+
+Argümansız çalıştırınca menü açılır. Örnekler ve ayrıntılar: docs/pisec.md
+EOF
+}
+
+need() {
+    local c
+    for c in "$@"; do
+        command -v "$c" >/dev/null || die "$c bulunamadı. Önce setup.sh'ı çalıştır."
+    done
+}
+
+ask_yes() {
+    local reply
+    read -r -p "$1" reply || return 1
+    [[ $reply =~ ^[eEyY] ]]
+}
+
+# KEY=VALUE satırlarından değer okur. Dosya source edilmiyor, içine kod yazılsa da çalışmaz.
+config_get() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    awk -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { if (v != "") print v }' "$CONFIG_FILE"
+}
+
+config_set() {
+    local tmp
+    mkdir -p "$CONF_DIR"
+    tmp=$(mktemp "$CONF_DIR/.config.XXXXXX")
+    if [ -f "$CONFIG_FILE" ]; then grep -v "^$1=" "$CONFIG_FILE" > "$tmp" || true; fi
+    if [ -n "$2" ]; then printf '%s=%s\n' "$1" "$2" >> "$tmp"; fi
+    chmod 600 "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+}
+
+# --- Adres yardımcıları -------------------------------------------------------
+
+is_ipv4() {
+    local o
+    [[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    for o in "${BASH_REMATCH[@]:1}"; do
+        [ $((10#$o)) -le 255 ] || return 1
+    done
+}
+
+is_cidr() {
+    local ip=${1%/*} bits=${1#*/}
+    [ "$ip" != "$1" ] && [[ $bits =~ ^[0-9]{1,2}$ ]] && [ "$((10#$bits))" -le 32 ] && is_ipv4 "$ip"
+}
+
+is_domain() {
+    [[ $1 =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]]
+}
+
+valid_target() {
+    is_ipv4 "$1" || is_cidr "$1" || is_domain "$1"
+}
+
+ip2int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+}
+
+int2ip() {
+    echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"
+}
+
+# $1 ağı (CIDR ya da tek adres) $2 adresini ya da ağını kapsıyor mu?
+cidr_contains() {
+    local net=$1 target=$2 nbits=32 tbits=32 mask
+    case $net in */*) nbits=$((10#${net#*/})); net=${net%/*} ;; esac
+    case $target in */*) tbits=$((10#${target#*/})); target=${target%/*} ;; esac
+    [ "$tbits" -ge "$nbits" ] || return 1
+    mask=$(( (0xFFFFFFFF << (32 - nbits)) & 0xFFFFFFFF ))
+    [ $(( $(ip2int "$net") & mask )) -eq $(( $(ip2int "$target") & mask )) ]
+}
+
+# 192.168.1.108/24 -> 192.168.1.0/24
+network_of() {
+    local bits=$((10#${1#*/})) mask
+    mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+    echo "$(int2ip $(( $(ip2int "${1%/*}") & mask )))/$bits"
+}
+
+is_private() {
+    local n
+    for n in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16; do
+        if cidr_contains "$n" "$1"; then return 0; fi
+    done
+    return 1
+}
+
+url_host() {
+    local h=${1#*://}
+    h=${h%%/*}; h=${h%%\?*}; h=${h%%#*}
+    h=${h##*@}
+    printf '%s\n' "${h%:*}"
+}
+
+valid_port() {
+    [[ $1 =~ ^[0-9]{1,5}$ ]] && [ "$((10#$1))" -ge 1 ] && [ "$((10#$1))" -le 65535 ]
+}
+
+# --- Kapsam -------------------------------------------------------------------
+
+in_scope() {
+    local t=$1 e
+    [ -f "$SCOPE_FILE" ] || return 1
+    while read -r e _; do
+        case $e in ''|\#*) continue ;; esac
+        e=${e,,}
+        if is_ipv4 "$t" || is_cidr "$t"; then
+            if { is_ipv4 "$e" || is_cidr "$e"; } && cidr_contains "$e" "$t"; then return 0; fi
+        else
+            # Alan adı kendisini ve alt alan adlarını kapsar; "kotuhedef.com" "hedef.com"a uymaz.
+            case $t in "$e"|*."$e") return 0 ;; esac
+        fi
+    done < "$SCOPE_FILE"
+    return 1
+}
+
+check_scope() {
+    if in_scope "$1"; then
+        SCOPE_NOTE="listede"
+        return 0
+    fi
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        warn "$1 kapsam listesinde yok, -y verildiği için devam ediliyor."
+        SCOPE_NOTE="listede değil, -y ile devam edildi"
+        return 0
+    fi
+    [ -t 0 ] || die "$1 kapsam listesinde yok. Eklemek için: pisec scope add $1 (ya da -y ver)"
+    warn "$1 kapsam listesinde ($SCOPE_FILE) yok."
+    local answer
+    read -r -p "Bu hedefi test etme iznin var mı? Devam etmek için 'evet' yaz: " answer || true
+    [ "$answer" = "evet" ] || die "Vazgeçildi."
+    SCOPE_NOTE="listede değil, elle onaylandı"
+}
+
+# --- Sonuç klasörü ve bildirim ------------------------------------------------
+
+safe_name() { printf '%s\n' "${1//\//_}"; }
+
+note() { printf '%s\n' "$@" >> "$RUN_DIR/ozet.md"; }
+
+count_lines() {
+    if [ -s "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi
+}
+
+start_run() {
+    local base dir n=1
+    base="$OUT_ROOT/$(safe_name "$2")/$(date +%Y%m%d-%H%M%S)-$1"
+    dir=$base
+    while [ -e "$dir" ]; do n=$((n + 1)); dir="$base-$n"; done
+    mkdir -p "$dir"
+    RUN_DIR=$dir
+    RUN_TITLE="pisec $1 $2"
+    note "# pisec $1: $2" "" "- Tarih: $(date '+%Y-%m-%d %H:%M:%S')" "- Kapsam: $SCOPE_NOTE"
+    if [ "$USE_TOR" -eq 1 ]; then
+        note "- Tor: evet, çıkış IP'si $TOR_EXIT_IP"
+    else
+        note "- Tor: hayır"
+    fi
+    log "Sonuçlar: $RUN_DIR"
+}
+
+finish_run() {
+    echo
+    cat "$RUN_DIR/ozet.md"
+    echo
+    log "Kaydedildi: $RUN_DIR"
+    if [ ${#HIGHLIGHTS[@]} -eq 0 ]; then HIGHLIGHTS=("Kayda değer bulgu yok."); fi
+    notify "$RUN_TITLE bitti" "$(printf '%s\n' "${HIGHLIGHTS[@]}")"
+}
+
+# Komutu komutlar.txt'ye yazıp çalıştırır; sonradan aynı taramayı tekrarlamak için.
+run() {
+    printf '%q ' "$@" >> "$RUN_DIR/komutlar.txt"
+    echo >> "$RUN_DIR/komutlar.txt"
+    "$@"
+}
+
+# Hedefin $2 komutuyla yapılmış son çalıştırmasının klasörü (yoksa boş).
+last_run() {
+    local d
+    for d in "$OUT_ROOT/$(safe_name "$1")"/*-"$2" "$OUT_ROOT/$(safe_name "$1")"/*-"$2"-[0-9]*; do
+        if [ -d "$d" ]; then printf '%s\n' "$d"; fi
+    done | LC_ALL=C sort | tail -n 1
+}
+
+# ntfy ayarlıysa bildirim gönderir. Ayar yoksa ya da PISEC_NOTIFY=0 ise sessizce geçer.
+notify() {
+    local url token server topic body auth=()
+    [ "${PISEC_NOTIFY:-1}" != 0 ] || return 0
+    url=$(config_get NTFY_URL)
+    [ -n "$url" ] || return 0
+    token=$(config_get NTFY_TOKEN)
+    if [ -n "$token" ]; then auth=(-H "Authorization: Bearer $token"); fi
+    server=${url%/*}
+    topic=${url##*/}
+    body=$(jq -cn --arg topic "$topic" --arg title "$1" --arg msg "$2" \
+        '{topic: $topic, title: $title, message: $msg, tags: ["pisec"]}')
+    curl -fsS --max-time 15 "${auth[@]}" -d "$body" "$server" >/dev/null \
+        || warn "Bildirim gönderilemedi ($url)."
+}
+
+cmd_notify() {
+    local url
+    case ${1:-status} in
+        status)
+            url=$(config_get NTFY_URL)
+            if [ -n "$url" ]; then echo "Bildirimler açık: $url"; else echo "Bildirimler kapalı. Açmak için: pisec notify set https://ntfy.sh/<konu>"; fi
+            ;;
+        set)
+            [ $# -ge 2 ] || die "Kullanım: pisec notify set <ntfy-adresi> [token]"
+            [[ $2 =~ ^https?://[A-Za-z0-9.:-]+(/[A-Za-z0-9_-]+)+$ ]] || die "Geçersiz adres: $2 (ör. https://ntfy.sh/pisec-benim-konum)"
+            config_set NTFY_URL "$2"
+            config_set NTFY_TOKEN "${3:-}"
+            log "Bildirimler $2 adresine gidecek. Denemek için: pisec notify test"
+            ;;
+        off)
+            config_set NTFY_URL ""
+            config_set NTFY_TOKEN ""
+            log "Bildirimler kapatıldı."
+            ;;
+        test)
+            need curl jq
+            [ -n "$(config_get NTFY_URL)" ] || die "Önce adres ver: pisec notify set <ntfy-adresi>"
+            notify "pisec deneme" "$(hostname) üzerinden gönderildi."
+            log "Deneme bildirimi gönderildi."
+            ;;
+        *) die "Kullanım: pisec notify [set <url> [token]|off|test]" ;;
+    esac
+}
+
+# --- Tor ----------------------------------------------------------------------
+
+tor_setup() {
+    need curl jq proxychains4 tor-resolve
+    TMP_DIR=$(mktemp -d)
+    # Tor, SOCKS kullanıcı adı farklı olan bağlantıları ayrı devrelerden çıkarıyor
+    # (IsolateSOCKSAuth). Her çalıştırma kendi kullanıcı adıyla kendi devresini alır.
+    TOR_USER="pisec$$$RANDOM"
+    PROXY_URL="socks5://$TOR_USER:x@$SOCKS"
+    PROXYCHAINS_CONF="$TMP_DIR/proxychains.conf"
+    cat > "$PROXYCHAINS_CONF" <<EOF
+strict_chain
+quiet_mode
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+
+[ProxyList]
+socks5 ${SOCKS%:*} ${SOCKS##*:} $TOR_USER x
+EOF
+    local resp
+    resp=$(curl -fsS --max-time 30 --proxy "socks5h://$TOR_USER:x@$SOCKS" "$CHECK_URL" 2>/dev/null) \
+        || die "Tor'a bağlanılamadı ($SOCKS). 'pisec tor status' ile kontrol et."
+    [ "$(jq -r .IsTor <<<"$resp")" = "true" ] || die "Bağlantı Tor'dan çıkmıyor: $resp"
+    TOR_EXIT_IP=$(jq -r .IP <<<"$resp")
+    log "Tor çıkış IP'si: $TOR_EXIT_IP"
+}
+
+# Alan adını Tor üzerinden çözer; DNS sorgusu yerel ağdan çıkmaz.
+tor_resolve() {
+    local ip
+    ip=$(tor-resolve "$1" "$SOCKS" 2>/dev/null) || ip=""
+    is_ipv4 "$ip" || die "$1 Tor üzerinden çözülemedi."
+    printf '%s\n' "$ip"
+}
+
+tor_status() {
+    need curl jq
+    local resp rc=0
+    if command -v systemctl >/dev/null; then
+        echo "Tor servisi: $(systemctl is-active tor@default 2>/dev/null || true)"
+    fi
+    if resp=$(curl -fsS --max-time 30 --proxy "socks5h://$SOCKS" "$CHECK_URL" 2>/dev/null); then
+        echo "Çıkış IP'si: $(jq -r .IP <<<"$resp") (Tor: $(jq -r .IsTor <<<"$resp"))"
+    else
+        echo "Çıkış IP'si: Tor'a bağlanılamadı ($SOCKS)"
+        rc=1
+    fi
+    if resp=$(curl -fsS --max-time 15 "$CHECK_URL" 2>/dev/null); then
+        echo "Gerçek IP: $(jq -r .IP <<<"$resp")"
+    fi
+    if [ -r "$TOR_COOKIE" ] && [ -w "$TOR_CONTROL" ]; then
+        echo "Kontrol soketi: erişilebilir ('pisec tor new' çalışır)"
+    else
+        echo "Kontrol soketi: erişim yok ('debian-tor' grubuna ekli olup yeniden giriş yapmak gerekiyor)"
+    fi
+    return "$rc"
+}
+
+tor_new() {
+    need python3
+    [ -r "$TOR_COOKIE" ] || die "Tor kontrol çerezi okunamıyor ($TOR_COOKIE). Kullanıcın 'debian-tor' grubunda olmalı: sudo usermod -aG debian-tor $(id -un), ardından yeniden giriş yap."
+    python3 - "$TOR_CONTROL" "$TOR_COOKIE" <<'PY' || die "Tor yeni devre isteğini kabul etmedi."
+import socket
+import sys
+
+sock_path, cookie_path = sys.argv[1], sys.argv[2]
+with open(cookie_path, "rb") as f:
+    cookie = f.read().hex()
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10)
+s.connect(sock_path)
+conn = s.makefile("rwb")
+for cmd in ("AUTHENTICATE " + cookie, "SIGNAL NEWNYM", "QUIT"):
+    conn.write(cmd.encode() + b"\r\n")
+    conn.flush()
+    reply = conn.readline().decode().strip()
+    if not reply.startswith("250"):
+        sys.exit("tor: " + reply)
+PY
+    log "Yeni devre istendi. Bundan sonraki bağlantılar yeni devrelerden çıkar."
+}
+
+cmd_tor() {
+    case "${1:-status}" in
+        status) tor_status ;;
+        new)    tor_new ;;
+        *)      die "Kullanım: pisec tor [status|new]" ;;
+    esac
+}
+
+# --- lan ----------------------------------------------------------------------
+
+lan_table() {
+    awk '
+        function row() { if (ip != "") printf "| %s | %s | %s | %s |\n", ip, name, mac, vendor }
+        /^Nmap scan report for / {
+            row()
+            rest = substr($0, 22); name = ""; mac = ""; vendor = ""
+            if (match(rest, /\([0-9.]+\)$/)) {
+                ip = substr(rest, RSTART + 1, RLENGTH - 2)
+                name = substr(rest, 1, RSTART - 2)
+            } else {
+                ip = rest
+            }
+        }
+        /^MAC Address: / {
+            mac = $3
+            vendor = substr($0, index($0, "(") + 1)
+            sub(/\)$/, "", vendor)
+        }
+        END { row() }' "$1"
+}
+
+cmd_lan() {
+    [ $# -le 1 ] || die "Kullanım: pisec lan [ağ]"
+    [ "$USE_TOR" -eq 0 ] || die "Yerel ağ Tor üzerinden taranmaz; Tor çıkış noktaları senin ağına ulaşamaz."
+    need nmap
+    local net=${1:-} dev cidr table count
+    if [ -z "$net" ]; then
+        need ip
+        # awk'ta exit yok: erken çıkarsa ip SIGPIPE alıyor ve pipefail betiği durduruyor.
+        dev=$(ip route show default 2>/dev/null | awk '!d { for (i = 1; i < NF; i++) if ($i == "dev") { d = $(i + 1); print d; break } }')
+        [ -n "$dev" ] || die "Varsayılan rota bulunamadı. Ağı elle ver: pisec lan 192.168.1.0/24"
+        cidr=$(ip -4 -o addr show dev "$dev" scope global | awk 'NR == 1 { print $4 }')
+        [ -n "$cidr" ] || die "$dev arayüzünde IPv4 adresi yok."
+        net=$(network_of "$cidr")
+        log "Ağ: $net ($dev)"
+    fi
+    is_cidr "$net" || is_ipv4 "$net" || die "Geçersiz ağ: $net"
+    check_scope "$net"
+
+    # ARP ile keşif root istiyor. Root olmadan nmap sadece TCP ile yokluyor ve
+    # telefon, IoT gibi port açmayan cihazların çoğunu göremiyor.
+    local nmap_cmd=(nmap)
+    if [ "$(id -u)" -ne 0 ]; then
+        if sudo -n true 2>/dev/null || { [ -t 0 ] && sudo -v; }; then
+            nmap_cmd=(sudo nmap)
+        else
+            warn "sudo kullanılamadı, ARP olmadan taranıyor; bazı cihazlar görünmeyebilir."
+        fi
+    fi
+
+    start_run lan "$net"
+    run "${nmap_cmd[@]}" -sn -oA "$RUN_DIR/nmap" "$net"
+    if [ "${nmap_cmd[0]}" = sudo ]; then
+        sudo chown "$(id -u):$(id -g)" "$RUN_DIR"/nmap.*
+    fi
+
+    table=$(lan_table "$RUN_DIR/nmap.nmap")
+    note "" "## Cihazlar" ""
+    if [ -n "$table" ]; then
+        count=$(printf '%s\n' "$table" | wc -l | tr -d ' ')
+        note "| Adres | Ad | MAC | Üretici |" "|---|---|---|---|" "$table" "" "$count cihaz bulundu."
+        HIGHLIGHTS+=("$count cihaz bulundu.")
+    else
+        note "Cihaz bulunamadı."
+    fi
+    finish_run
+}
+
+# --- scan ---------------------------------------------------------------------
+
+# Ham soket kullanan ya da Tor dışından paket gönderen nmap seçenekleri.
+check_tor_nmap_args() {
+    local a
+    for a in "$@"; do
+        case $a in
+            -sS*|-sU*|-sA*|-sW*|-sM*|-sN*|-sF*|-sX*|-sY*|-sZ*|-sO*|-sn*|-sI*|-b|-O*|-P[EPMSAUYOR]*|--traceroute|--send-eth|--send-ip|-6)
+                die "$a Tor üzerinden çalışmaz: ham soket kullanıyor ya da gerçek adresinden paket gönderiyor." ;;
+        esac
+    done
+}
+
+nmap_ports_table() {
+    awk -F'\t' '
+        $2 ~ /^Ports: / {
+            host = $1; sub(/^Host: /, "", host); sub(/ .*/, "", host)
+            ports = $2; sub(/^Ports: /, "", ports)
+            n = split(ports, list, ", ")
+            for (i = 1; i <= n; i++) {
+                split(list[i], f, "/")
+                gsub(/\|/, "/", f[5]); gsub(/\|/, "/", f[7])
+                if (f[2] == "open") printf "| %s | %s/%s | %s | %s |\n", host, f[1], f[3], f[5], f[7]
+            }
+        }' "$1"
+}
+
+# Açık portları karşılaştırılabilir satırlar olarak verir. Tek hedefte sadece
+# "port/proto"; Tor'da adres her seferinde değişebildiği için adres dahil edilmiyor.
+open_ports() {
+    awk -F'\t' -v with_host="$2" '
+        $2 ~ /^Ports: / {
+            host = $1; sub(/^Host: /, "", host); sub(/ .*/, "", host)
+            ports = $2; sub(/^Ports: /, "", ports)
+            n = split(ports, list, ", ")
+            for (i = 1; i <= n; i++) {
+                split(list[i], f, "/")
+                if (f[2] == "open") print (with_host ? host " " : "") f[1] "/" f[3]
+            }
+        }' "$1" | LC_ALL=C sort -u
+}
+
+cmd_scan() {
+    [ $# -ge 1 ] || die "Kullanım: pisec scan <hedef> [--tor] [-p portlar | --top N] [-- nmap seçenekleri]"
+    local target=${1,,} addr default_top nmap_args=() table prev with_host=0 new gone count
+    shift
+    valid_target "$target" || die "Geçersiz hedef: $target"
+    need nmap
+    check_scope "$target"
+    prev=$(last_run "$target" scan)
+    if is_cidr "$target"; then with_host=1; fi
+
+    if [ "$USE_TOR" -eq 1 ]; then
+        if is_cidr "$target"; then
+            die "Tor üzerinden ağ aralığı taranmaz, tek bir adres ya da alan adı ver."
+        fi
+        if is_ipv4 "$target" && is_private "$target"; then
+            die "$target özel bir adres; Tor çıkış noktaları buraya ulaşamaz."
+        fi
+        check_tor_nmap_args "$@"
+        tor_setup
+        if is_ipv4 "$target"; then addr=$target; else addr=$(tor_resolve "$target") || exit 1; fi
+        if is_private "$addr"; then
+            die "$target özel bir adrese ($addr) çözülüyor; Tor üzerinden taranamaz."
+        fi
+        # -sT: proxychains sadece connect() çağrısını yönlendirebiliyor.
+        # -Pn: ping Tor'dan geçmez. -n: ters DNS sorgusu Tor dışından gider.
+        nmap_args=(-sT -Pn -n --open)
+        if [ "$SERVICE_VERSIONS" -eq 1 ]; then nmap_args+=(-sV); fi
+        default_top=100
+    else
+        addr=$target
+        nmap_args=(-sV -T4 --open)
+        default_top=1000
+    fi
+    if [ -n "$PORTS" ]; then
+        nmap_args+=(-p "$PORTS")
+    else
+        nmap_args+=(--top-ports "${TOP:-$default_top}")
+    fi
+
+    start_run scan "$target"
+    if [ "$addr" != "$target" ]; then note "- Adres: $addr (Tor üzerinden çözüldü)"; fi
+    if [ "$USE_TOR" -eq 1 ]; then
+        warn "Tor üzerinden tarama yavaş; çıkış noktalarının çoğu 25, 445 gibi portlara izin vermiyor."
+        run proxychains4 -f "$PROXYCHAINS_CONF" nmap "${nmap_args[@]}" "$@" -oA "$RUN_DIR/nmap" "$addr"
+    else
+        run nmap "${nmap_args[@]}" "$@" -oA "$RUN_DIR/nmap" "$addr"
+    fi
+
+    table=$(nmap_ports_table "$RUN_DIR/nmap.gnmap")
+    note "" "## Açık portlar" ""
+    if [ -n "$table" ]; then
+        count=$(printf '%s\n' "$table" | wc -l | tr -d ' ')
+        note "| Adres | Port | Servis | Sürüm |" "|---|---|---|---|" "$table"
+        HIGHLIGHTS+=("$count açık port.")
+    else
+        note "Açık port bulunamadı."
+    fi
+
+    if [ -n "$prev" ] && [ -f "$prev/nmap.gnmap" ]; then
+        new=$(comm -13 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
+        gone=$(comm -23 <(open_ports "$prev/nmap.gnmap" "$with_host") <(open_ports "$RUN_DIR/nmap.gnmap" "$with_host"))
+        note "" "## Önceki taramaya göre ($(basename "$prev"))" ""
+        if [ -z "$new" ] && [ -z "$gone" ]; then
+            note "Değişiklik yok."
+        fi
+        if [ -n "$new" ]; then
+            note "Yeni açılan portlar:" "" "$(printf '%s\n' "$new" | sed 's/^/- /')" ""
+            HIGHLIGHTS+=("Yeni açılan portlar: $(printf '%s' "$new" | tr '\n' ' ')")
+        fi
+        if [ -n "$gone" ]; then
+            note "Artık açık görünmeyenler:" "" "$(printf '%s\n' "$gone" | sed 's/^/- /')" ""
+        fi
+        note "Port listesi iki taramada farklıysa karşılaştırma yanıltıcı olabilir."
+    fi
+    finish_run
+}
+
+# --- recon --------------------------------------------------------------------
+
+cmd_recon() {
+    [ $# -eq 1 ] || die "Kullanım: pisec recon <alan-adı> [--tor]"
+    local domain=${1,,} prev proxy_args=() new gone subs web
+    if ! is_domain "$domain" || is_ipv4 "$domain"; then die "Geçersiz alan adı: $domain"; fi
+    need subfinder httpx
+    check_scope "$domain"
+    prev=$(last_run "$domain" recon)
+
+    if [ "$USE_TOR" -eq 1 ]; then
+        tor_setup
+        proxy_args=(-proxy "$PROXY_URL")
+    else
+        need dnsx
+    fi
+
+    start_run recon "$domain"
+    log "Alt alan adları toplanıyor (subfinder, pasif kaynaklar)"
+    run subfinder -d "$domain" -silent -o "$RUN_DIR/subdomains.txt" "${proxy_args[@]}" \
+        || warn "subfinder hata koduyla bitti ($?)."
+    touch "$RUN_DIR/subdomains.txt"
+
+    if [ "$USE_TOR" -eq 0 ]; then
+        log "DNS kayıtları çözülüyor (dnsx)"
+        run dnsx -l "$RUN_DIR/subdomains.txt" -silent -a -resp -o "$RUN_DIR/dns.txt" \
+            || warn "dnsx hata koduyla bitti ($?)."
+    fi
+
+    log "Canlı web servisleri aranıyor (httpx)"
+    run httpx -l "$RUN_DIR/subdomains.txt" -silent -nc -sc -title -td -o "$RUN_DIR/web.txt" "${proxy_args[@]}" \
+        || warn "httpx hata koduyla bitti ($?)."
+
+    subs=$(count_lines "$RUN_DIR/subdomains.txt")
+    web=$(count_lines "$RUN_DIR/web.txt")
+    note "" "## Sonuç" "" "- Alt alan adı: $subs"
+    if [ "$USE_TOR" -eq 0 ]; then
+        if [ -s "$RUN_DIR/dns.txt" ]; then
+            note "- DNS kaydı olan: $(awk '{ print $1 }' "$RUN_DIR/dns.txt" | sort -u | wc -l | tr -d ' ')"
+        else
+            note "- DNS kaydı olan: 0"
+        fi
+    else
+        note "- DNS çözümlemesi Tor modunda atlandı (dnsx kendi DNS sorgularını yapıyor)."
+    fi
+    note "- Canlı web servisi: $web"
+    HIGHLIGHTS+=("$subs alt alan adı, $web canlı web servisi.")
+    if [ -s "$RUN_DIR/web.txt" ]; then
+        note "" "### Web servisleri" ""
+        awk 'NR <= 100 { print "- " $0 }' "$RUN_DIR/web.txt" >> "$RUN_DIR/ozet.md"
+    fi
+
+    if [ -n "$prev" ] && [ -f "$prev/subdomains.txt" ]; then
+        new=$(comm -13 <(sort -u "$prev/subdomains.txt") <(sort -u "$RUN_DIR/subdomains.txt"))
+        gone=$(comm -23 <(sort -u "$prev/subdomains.txt") <(sort -u "$RUN_DIR/subdomains.txt"))
+        note "" "## Önceki çalıştırmaya göre ($(basename "$prev"))" ""
+        if [ -n "$new" ]; then
+            note "Yeni alt alan adları:" "" "$(printf '%s\n' "$new" | sed 's/^/- /')" ""
+            HIGHLIGHTS+=("Yeni alt alan adları: $(printf '%s' "$new" | tr '\n' ' ')")
+        else
+            note "Yeni alt alan adı yok." ""
+        fi
+        if [ -n "$gone" ]; then
+            note "Artık görünmeyenler:" "" "$(printf '%s\n' "$gone" | sed 's/^/- /')"
+        fi
+    fi
+    finish_run
+}
+
+# --- web ----------------------------------------------------------------------
+
+SECURITY_HEADERS=(Strict-Transport-Security Content-Security-Policy X-Content-Type-Options
+                  X-Frame-Options Referrer-Policy Permissions-Policy)
+
+header_summary() {
+    local file=$1 url=$2 last status h line missing=()
+    note "" "## HTTP başlıkları" ""
+    if [ ! -s "$file" ]; then
+        note "- Yanıt alınamadı."
+        return 0
+    fi
+    # Yönlendirmeler izlendiğinde dosyada birden fazla yanıt oluyor; son yanıta bakılır.
+    last=$(awk '/^HTTP\// { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$file" | tr -d '\r')
+    status=${last%%$'\n'*}
+    note "- Yanıt: $status"
+    for h in "${SECURITY_HEADERS[@]}"; do
+        if [ "$h" = Strict-Transport-Security ] && [[ $url != https://* ]]; then continue; fi
+        if [ "$h" = X-Frame-Options ] && grep -qi '^content-security-policy:.*frame-ancestors' <<<"$last"; then continue; fi
+        grep -qi "^$h:" <<<"$last" || missing+=("$h")
+    done
+    if [ ${#missing[@]} -eq 0 ]; then
+        note "- Güvenlik başlıklarının hepsi var."
+    else
+        note "- Eksik güvenlik başlıkları: ${missing[*]}"
+        HIGHLIGHTS+=("${#missing[@]} güvenlik başlığı eksik.")
+    fi
+    for h in Server X-Powered-By; do
+        line=$(grep -i -m 1 "^$h:" <<<"$last" || true)
+        if [ -n "$line" ]; then note "- Sürüm bilgisi verebilen başlık: \`$line\`"; fi
+    done
+}
+
+testssl_summary() {
+    local json=$1 counts findings
+    note "" "## TLS (testssl.sh)" ""
+    if [ ! -s "$json" ]; then
+        note "- testssl sonuç üretmedi, testssl.log dosyasına bak."
+        return 0
+    fi
+    counts=$(jq -r '[.[] | select(.severity == "LOW" or .severity == "MEDIUM" or .severity == "HIGH" or .severity == "CRITICAL")]
+                    | group_by(.severity) | map("\(.[0].severity): \(length)") | join(", ")' "$json") || counts="okunamadı"
+    note "- Bulgular: ${counts:-yok}"
+    if [ -n "$counts" ]; then HIGHLIGHTS+=("TLS: $counts"); fi
+    findings=$(jq -r '.[] | select(.severity == "HIGH" or .severity == "CRITICAL") | "- \(.severity) \(.id): \(.finding)"' "$json") || findings=""
+    if [ -n "$findings" ]; then note "$findings"; fi
+}
+
+cmd_web() {
+    [ $# -eq 1 ] || die "Kullanım: pisec web <url> [--tor] [--no-nuclei] [--no-tls]"
+    local url=$1 host addr curl_proxy=() nuclei_extra=() count
+    case $url in http://*|https://*) ;; *) url="https://$url" ;; esac
+    host=$(url_host "$url")
+    host=${host,,}
+    is_ipv4 "$host" || is_domain "$host" || die "Geçersiz adres: $1"
+    need curl jq
+    if [ "$DO_NUCLEI" -eq 1 ]; then need nuclei; fi
+    if [[ $url != https://* ]]; then DO_TLS=0; fi
+    if [ "$DO_TLS" -eq 1 ]; then need testssl; fi
+    check_scope "$host"
+
+    if [ "$USE_TOR" -eq 1 ]; then
+        if is_ipv4 "$host" && is_private "$host"; then
+            die "$host özel bir adres; Tor çıkış noktaları buraya ulaşamaz."
+        fi
+        tor_setup
+        curl_proxy=(--proxy "socks5h://$TOR_USER:x@$SOCKS")
+        # dns, ssl, network şablonları bağlantıyı kendisi açıyor ve proxy'yi kullanmıyor.
+        # interactsh (OAST) istekleri de Tor dışından gidiyor.
+        nuclei_extra=(-proxy "$PROXY_URL" -pt http -ni -timeout 20 -retries 1)
+    fi
+
+    start_run web "$host"
+    note "- URL: $url"
+
+    log "HTTP başlıkları alınıyor"
+    run curl -sS -L --max-time 30 -o /dev/null -D "$RUN_DIR/headers.txt" "${curl_proxy[@]}" "$url" \
+        || warn "curl hata koduyla bitti ($?)."
+    header_summary "$RUN_DIR/headers.txt" "$url"
+
+    if [ "$DO_TLS" -eq 1 ]; then
+        log "TLS ayarları kontrol ediliyor (testssl.sh, birkaç dakika sürebilir)"
+        local tls_args=(--quiet --color 0 --warnings batch --jsonfile "$RUN_DIR/testssl.json" --logfile "$RUN_DIR/testssl.log")
+        if [ "$USE_TOR" -eq 1 ]; then
+            if is_ipv4 "$host"; then addr=$host; else addr=$(tor_resolve "$host") || exit 1; fi
+            # testssl adresi kendisi çözünce DNS sorgusu Tor dışından gidiyor. Adresi
+            # Tor üzerinden çözüp --ip ile veriyor, testssl'in DNS sorgularını kapatıyoruz.
+            run proxychains4 -f "$PROXYCHAINS_CONF" testssl "${tls_args[@]}" --ip "$addr" --nodns none "$url" \
+                || warn "testssl hata koduyla bitti ($?)."
+        else
+            run testssl "${tls_args[@]}" "$url" || warn "testssl hata koduyla bitti ($?)."
+        fi
+        testssl_summary "$RUN_DIR/testssl.json"
+    fi
+
+    if [ "$DO_NUCLEI" -eq 1 ]; then
+        log "nuclei çalışıyor (önem: $SEVERITY)"
+        run nuclei -u "$url" -duc -silent -nc -s "$SEVERITY" -rl 30 -c 5 -o "$RUN_DIR/nuclei.txt" "${nuclei_extra[@]}" \
+            || warn "nuclei hata koduyla bitti ($?)."
+        note "" "## nuclei" ""
+        if [ -s "$RUN_DIR/nuclei.txt" ]; then
+            count=$(count_lines "$RUN_DIR/nuclei.txt")
+            note "$count bulgu:" ""
+            awk 'NR <= 50 { print "- " $0 }' "$RUN_DIR/nuclei.txt" >> "$RUN_DIR/ozet.md"
+            HIGHLIGHTS+=("nuclei: $count bulgu.")
+        else
+            note "Bulgu yok."
+        fi
+        if [ "$USE_TOR" -eq 1 ]; then
+            note "" "Tor modunda sadece HTTP şablonları çalıştı ve OAST kapalıydı. Tor çıkışlarını" \
+                 "engelleyen sitelerde \"bulgu yok\" hedefin temiz olduğu anlamına gelmiyor."
+        fi
+    fi
+    finish_run
+}
+
+# --- scope, results -----------------------------------------------------------
+
+cmd_scope() {
+    local action=${1:-list} t
+    case $action in
+        list|ls)
+            if [ -f "$SCOPE_FILE" ] && grep -qv '^[[:space:]]*\(#\|$\)' "$SCOPE_FILE"; then
+                grep -v '^[[:space:]]*\(#\|$\)' "$SCOPE_FILE"
+            else
+                echo "Kapsam listesi boş. Eklemek için: pisec scope add <hedef>"
+            fi
+            ;;
+        add)
+            shift
+            [ $# -ge 1 ] || die "Kullanım: pisec scope add <hedef>..."
+            if [ ! -f "$SCOPE_FILE" ]; then
+                mkdir -p "$(dirname "$SCOPE_FILE")"
+                cat > "$SCOPE_FILE" <<'EOF'
+# pisec kapsam listesi: test etme iznin olan hedefler.
+# Her satıra bir alan adı (alt alan adlarını da kapsar), IPv4 adresi ya da ağ (CIDR).
+EOF
+            fi
+            for t in "$@"; do
+                t=${t,,}
+                valid_target "$t" || die "Geçersiz hedef: $t"
+                if grep -qxF -- "$t" "$SCOPE_FILE"; then
+                    log "$t zaten listede."
+                else
+                    echo "$t" >> "$SCOPE_FILE"
+                    log "$t eklendi."
+                fi
+            done
+            ;;
+        rm|remove)
+            shift
+            [ $# -ge 1 ] || die "Kullanım: pisec scope rm <hedef>..."
+            [ -f "$SCOPE_FILE" ] || die "Kapsam listesi yok."
+            for t in "$@"; do
+                t=${t,,}
+                if grep -qxF -- "$t" "$SCOPE_FILE"; then
+                    grep -vxF -- "$t" "$SCOPE_FILE" > "$SCOPE_FILE.tmp" || true
+                    mv "$SCOPE_FILE.tmp" "$SCOPE_FILE"
+                    log "$t çıkarıldı."
+                else
+                    warn "$t listede yok."
+                fi
+            done
+            ;;
+        check)
+            [ $# -eq 2 ] || die "Kullanım: pisec scope check <hedef>"
+            t=${2,,}
+            case $t in http://*|https://*) t=$(url_host "$t") ;; esac
+            valid_target "$t" || die "Geçersiz hedef: $t"
+            if in_scope "$t"; then echo "$t kapsamda."; else echo "$t kapsam listesinde yok."; return 1; fi
+            ;;
+        *) die "Kullanım: pisec scope [list|add|rm|check] [hedef...]" ;;
+    esac
+}
+
+cmd_results() {
+    local d runs last
+    if [ $# -eq 0 ]; then
+        if [ ! -d "$OUT_ROOT" ] || [ -z "$(ls -A "$OUT_ROOT")" ]; then
+            echo "Henüz kayıtlı sonuç yok."
+            return 0
+        fi
+        for d in "$OUT_ROOT"/*/; do
+            runs=$(find "$d" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+            last=$(find "$d" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort | tail -n 1)
+            printf '%s  (%s çalıştırma, son: %s)\n' "$(basename "$d")" "$runs" "$last"
+        done
+        return 0
+    fi
+    d="$OUT_ROOT/$(safe_name "${1,,}")"
+    [ -d "$d" ] || die "$1 için kayıtlı sonuç yok."
+    find "$d" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort
+    last=$(find "$d" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort | tail -n 1)
+    echo
+    cat "$last/ozet.md"
+    echo
+    log "Klasör: $last"
+}
+
+# --- schedule -----------------------------------------------------------------
+# Her görev ~/.config/systemd/user altında bir .service ve bir .timer. systemd
+# zamanı geldiğinde görevi çalıştırıyor, Pi yeniden başlasa da kaçırılanı
+# telafi ediyor (Persistent=true). Kullanıcı oturumu kapalıyken de çalışması
+# için linger açık olmalı; setup.sh bunu yapıyor.
+
+valid_job_name() { [[ $1 =~ ^[a-z0-9][a-z0-9.-]{0,62}$ ]]; }
+
+schedule_add() {
+    [ $# -eq 3 ] || die 'Kullanım: pisec schedule add "<zaman>" <scan|recon|web|lan> <hedef> [--tor] [--name ad]'
+    local when=$1 job=$2 target=${3,,} host name flags=()
+    need systemctl systemd-analyze
+    case $job in scan|recon|web|lan) ;; *) die "Zamanlanabilen komutlar: scan, recon, web, lan" ;; esac
+    if [[ ! $when =~ ^[A-Za-z0-9*:/,.~\ -]+$ ]] || ! systemd-analyze calendar "$when" >/dev/null 2>&1; then
+        die "Geçersiz zaman: $when (ör. daily, weekly, \"Mon *-*-* 03:00\", \"*-*-* 02:30\")"
+    fi
+
+    host=$target
+    if [ "$job" = web ]; then host=$(url_host "$target"); fi
+    valid_target "$host" || die "Geçersiz hedef: $target"
+    if [ "$job" = recon ] && { ! is_domain "$host" || is_ipv4 "$host"; }; then die "recon bir alan adı bekliyor."; fi
+    in_scope "$host" || die "Zamanlanmış görev onay soramaz; hedef kapsam listesinde olmalı: pisec scope add $host"
+
+    if [ "$USE_TOR" -eq 1 ]; then flags+=(--tor); fi
+    if [ -n "$PORTS" ]; then flags+=(-p "$PORTS"); fi
+    if [ -n "$TOP" ]; then flags+=(--top "$TOP"); fi
+    if [ "$SERVICE_VERSIONS" -eq 1 ]; then flags+=(--sv); fi
+    if [ "$SEVERITY" != "$DEFAULT_SEVERITY" ]; then flags+=(-s "$SEVERITY"); fi
+    if [ "$DO_NUCLEI" -eq 0 ]; then flags+=(--no-nuclei); fi
+    if [ "$DO_TLS" -eq 0 ]; then flags+=(--no-tls); fi
+
+    name=${NAME:-$job-$host}
+    name=$(printf '%s' "${name,,}" | tr -c 'a-z0-9.-' '-')
+    valid_job_name "$name" || die "Geçersiz görev adı: $name"
+    [ ! -e "$UNIT_DIR/pisec-job-$name.timer" ] || die "$name adında bir görev zaten var. Başka ad için --name ver."
+
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/pisec-job-$name.service" <<EOF
+# pisec schedule ile oluşturuldu
+[Unit]
+Description=pisec $job $target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.pdtm/go/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$SELF $job $target${flags[*]:+ ${flags[*]}}
+EOF
+    cat > "$UNIT_DIR/pisec-job-$name.timer" <<EOF
+# pisec schedule ile oluşturuldu
+[Unit]
+Description=pisec zamanlayıcı: $name
+
+[Timer]
+OnCalendar=$when
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "pisec-job-$name.timer" >/dev/null 2>&1 \
+        || die "Zamanlayıcı başlatılamadı: systemctl --user status pisec-job-$name.timer"
+    log "Görev eklendi: $name ($when)"
+}
+
+schedule_list() {
+    local t name when cmd next last items=()
+    shopt -s nullglob
+    local timers=("$UNIT_DIR"/pisec-job-*.timer)
+    shopt -u nullglob
+    for t in "${timers[@]}"; do
+        name=$(basename "$t" .timer)
+        name=${name#pisec-job-}
+        when=$(sed -n 's/^OnCalendar=//p' "$t")
+        cmd=$(sed -n 's/^ExecStart=[^ ]* //p' "${t%.timer}.service")
+        next=$(systemctl --user show "pisec-job-$name.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+        last=$(systemctl --user show "pisec-job-$name.timer" -p LastTriggerUSec --value 2>/dev/null || true)
+        if [ "$JSON_OUT" -eq 1 ]; then
+            items+=("$(jq -n --arg name "$name" --arg when "$when" --arg command "$cmd" --arg next "$next" --arg last "$last" \
+                '{name: $name, when: $when, command: $command, next: $next, last: $last}')")
+        else
+            printf '%s\n    zaman: %s\n    komut: pisec %s\n    sonraki: %s\n    son: %s\n' \
+                "$name" "$when" "$cmd" "${next:--}" "${last:--}"
+        fi
+    done
+    if [ "$JSON_OUT" -eq 1 ]; then
+        if [ ${#items[@]} -eq 0 ]; then echo "[]"; else printf '%s\n' "${items[@]}" | jq -s .; fi
+    elif [ ${#timers[@]} -eq 0 ]; then
+        echo "Zamanlanmış görev yok. Eklemek için: pisec schedule add daily recon hedef.com"
+    fi
+}
+
+cmd_schedule() {
+    local name
+    case ${1:-list} in
+        list|ls) schedule_list ;;
+        add) shift; schedule_add "$@" ;;
+        rm|remove|run)
+            [ $# -eq 2 ] || die "Kullanım: pisec schedule $1 <ad>"
+            name=$2
+            if ! valid_job_name "$name" || [ ! -f "$UNIT_DIR/pisec-job-$name.timer" ]; then
+                die "$name adında görev yok."
+            fi
+            if [ "$1" = run ]; then
+                systemctl --user start --no-block "pisec-job-$name.service"
+                log "$name başlatıldı. Çıktı: journalctl --user -u pisec-job-$name"
+            else
+                systemctl --user disable --now "pisec-job-$name.timer" >/dev/null 2>&1 || true
+                rm -f "$UNIT_DIR/pisec-job-$name.timer" "$UNIT_DIR/pisec-job-$name.service"
+                systemctl --user daemon-reload
+                log "$name silindi."
+            fi
+            ;;
+        *) die "Kullanım: pisec schedule [list|add|rm|run]" ;;
+    esac
+}
+
+# --- publish, tunnel ----------------------------------------------------------
+
+panel_port() {
+    local conf="$CONF_DIR/panel.json"
+    if [ -f "$conf" ] && command -v jq >/dev/null; then
+        jq -r '.port // 8090' "$conf" 2>/dev/null || echo 8090
+    else
+        echo 8090
+    fi
+}
+
+publish_start() {
+    local port=$1 unit url log_file i
+    valid_port "$port" || die "Geçersiz port: $port"
+    port=$((10#$port))
+    need cloudflared systemd-run systemctl curl
+    if [ "$port" = "$(panel_port)" ]; then
+        die "Panel geçici tünelle yayınlanmaz: adresi bulan herkes giriş sayfasına ulaşır. Paneli dışarı açmak için docs/panel.md içindeki Cloudflare Access adımlarına bak."
+    fi
+    unit="pisec-publish-$port"
+    if systemctl --user is-active --quiet "$unit"; then
+        die "$port zaten yayında: $(cat "$STATE_DIR/publish-$port.url" 2>/dev/null || echo '?')"
+    fi
+    curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$port" \
+        || warn "127.0.0.1:$port yanıt vermiyor; tünel açılır ama sayfa hata verir."
+    if [ "$ASSUME_YES" -eq 0 ]; then
+        [ -t 0 ] || die "Adres herkese açık olacak; onaylamak için -y ver."
+        ask_yes "127.0.0.1:$port, adresi bilen herkesin açabileceği bir trycloudflare.com adresinden yayınlanacak. Devam? [e/H] " \
+            || die "Vazgeçildi."
+    fi
+
+    mkdir -p "$STATE_DIR"
+    log_file="$STATE_DIR/publish-$port.log"
+    : > "$log_file"
+    systemd-run --user --unit "$unit" --collect --quiet \
+        cloudflared tunnel --no-autoupdate --logfile "$log_file" --url "http://127.0.0.1:$port"
+    url=""
+    for i in $(seq 1 45); do
+        url=$(grep -m 1 -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$log_file" || true)
+        if [ -n "$url" ]; then break; fi
+        if ! systemctl --user is-active --quiet "$unit"; then break; fi
+        if [ "$i" -lt 45 ]; then sleep 1; fi
+    done
+    if [ -z "$url" ]; then
+        systemctl --user stop "$unit" 2>/dev/null || true
+        die "cloudflared adres vermedi. Günlük: $log_file"
+    fi
+    echo "$url" > "$STATE_DIR/publish-$port.url"
+    log "Yayında: $url -> 127.0.0.1:$port"
+    log "Kapatmak için: pisec publish stop $port"
+}
+
+publish_list() {
+    local f port url items=() lines=()
+    shopt -s nullglob
+    for f in "$STATE_DIR"/publish-*.url; do
+        port=${f##*/publish-}
+        port=${port%.url}
+        # Tünel kendiliğinden kapanmışsa (Pi yeniden başladı, cloudflared düştü) kaydı temizle.
+        if ! systemctl --user is-active --quiet "pisec-publish-$port"; then
+            rm -f "$f"
+            continue
+        fi
+        url=$(cat "$f")
+        items+=("$(jq -n --argjson port "$port" --arg url "$url" '{port: $port, url: $url}')")
+        lines+=("$url  ->  127.0.0.1:$port")
+    done
+    shopt -u nullglob
+    if [ "$JSON_OUT" -eq 1 ]; then
+        if [ ${#items[@]} -eq 0 ]; then echo "[]"; else printf '%s\n' "${items[@]}" | jq -s .; fi
+    elif [ ${#lines[@]} -eq 0 ]; then
+        echo "Yayında port yok."
+    else
+        printf '%s\n' "${lines[@]}"
+    fi
+}
+
+cmd_publish() {
+    case ${1:-list} in
+        list|ls) publish_list ;;
+        stop)
+            if [ $# -ne 2 ] || ! valid_port "$2"; then die "Kullanım: pisec publish stop <port>"; fi
+            systemctl --user stop "pisec-publish-$((10#$2))" 2>/dev/null || true
+            rm -f "$STATE_DIR/publish-$((10#$2)).url"
+            log "$2 yayından kaldırıldı."
+            ;;
+        *)
+            [ $# -eq 1 ] || die "Kullanım: pisec publish <port>"
+            publish_start "$1"
+            ;;
+    esac
+}
+
+cmd_tunnel() {
+    local env_file="$CONF_DIR/cloudflared.env" unit="pisec-tunnel.service" token
+    case ${1:-status} in
+        status)
+            if [ -f "$env_file" ]; then echo "Token: kayıtlı"; else echo "Token: yok (pisec tunnel token)"; fi
+            echo "Tünel: $(systemctl --user is-active "$unit" 2>/dev/null || true)"
+            ;;
+        token)
+            if [ -t 0 ]; then
+                read -r -s -p "Cloudflare tünel token'ı: " token
+                echo
+            else
+                read -r token || true
+            fi
+            [[ $token =~ ^[A-Za-z0-9+/=_-]{40,}$ ]] || die "Bu bir tünel token'ına benzemiyor."
+            mkdir -p "$CONF_DIR"
+            (umask 077 && printf 'TUNNEL_TOKEN=%s\n' "$token" > "$env_file")
+            log "Token kaydedildi ($env_file). Başlatmak için: pisec tunnel start"
+            ;;
+        start)
+            need cloudflared systemctl
+            [ -f "$env_file" ] || die "Önce token'ı kaydet: pisec tunnel token"
+            mkdir -p "$UNIT_DIR"
+            cat > "$UNIT_DIR/$unit" <<EOF
+# pisec tunnel ile oluşturuldu
+[Unit]
+Description=pisec Cloudflare tüneli
+
+[Service]
+EnvironmentFile=$env_file
+ExecStart=$(command -v cloudflared) tunnel --no-autoupdate run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+            systemctl --user daemon-reload
+            systemctl --user enable --now "$unit" >/dev/null 2>&1 || die "Tünel başlatılamadı: journalctl --user -u $unit"
+            log "Tünel çalışıyor. Hangi adresin nereye gideceğini Cloudflare Zero Trust panelinden ayarla."
+            ;;
+        stop)
+            systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+            log "Tünel durduruldu."
+            ;;
+        *) die "Kullanım: pisec tunnel [status|token|start|stop]" ;;
+    esac
+}
+
+# --- panel --------------------------------------------------------------------
+
+cmd_panel() {
+    local unit="pisec-panel.service" conf="$CONF_DIR/panel.json"
+    case ${1:-status} in
+        status)
+            echo "Panel: $(systemctl --user is-active "$unit" 2>/dev/null || true)"
+            if [ -f "$conf" ]; then
+                echo "Adres: http://$(jq -r '.host // "127.0.0.1"' "$conf"):$(panel_port)"
+            else
+                echo "Parola belirlenmemiş: pisec panel passwd"
+            fi
+            echo "Başka bir bilgisayardan açmak için: ssh -L $(panel_port):127.0.0.1:$(panel_port) $(id -un)@$(hostname).local"
+            ;;
+        passwd)
+            [ -f "$PANEL_DIR/app.py" ] || die "Panel kurulu değil: ./setup.sh --with-panel"
+            python3 "$PANEL_DIR/app.py" passwd
+            ;;
+        start|stop|restart)
+            [ -f "$UNIT_DIR/$unit" ] || die "Panel kurulu değil: ./setup.sh --with-panel"
+            if [ "$1" = start ] && [ ! -f "$conf" ]; then die "Önce parola belirle: pisec panel passwd"; fi
+            case $1 in
+                start)   systemctl --user enable --now "$unit" ;;
+                stop)    systemctl --user disable --now "$unit" ;;
+                restart) systemctl --user restart "$unit" ;;
+            esac
+            log "Panel: $(systemctl --user is-active "$unit" 2>/dev/null || true)"
+            ;;
+        *) die "Kullanım: pisec panel [status|passwd|start|stop|restart]" ;;
+    esac
+}
+
+# --- Menü ---------------------------------------------------------------------
+
+menu() {
+    local choice target tor_flag
+    while true; do
+        cat <<'EOF'
+
+pisec
+  1) Tor durumu            5) Alt alan adı keşfi
+  2) Yeni Tor devresi      6) Web denetimi
+  3) Yerel ağ taraması     7) Kapsam listesi
+  4) Port taraması         8) Kayıtlı sonuçlar
+  q) Çıkış
+EOF
+        read -r -p "Seçim: " choice || return 0
+        tor_flag=()
+        case $choice in
+            1) "$BASH" "$SELF" tor status ;;
+            2) "$BASH" "$SELF" tor new ;;
+            3) "$BASH" "$SELF" lan ;;
+            4|5|6)
+                read -r -p "Hedef: " target || return 0
+                [ -n "$target" ] || continue
+                if ask_yes "Tor üzerinden mi? [e/H] "; then tor_flag=(--tor); fi
+                case $choice in
+                    4) "$BASH" "$SELF" scan "$target" "${tor_flag[@]}" ;;
+                    5) "$BASH" "$SELF" recon "$target" "${tor_flag[@]}" ;;
+                    6) "$BASH" "$SELF" web "$target" "${tor_flag[@]}" ;;
+                esac
+                ;;
+            7)
+                "$BASH" "$SELF" scope
+                read -r -p "Eklenecek hedef (boş bırakırsan geçer): " target || return 0
+                if [ -n "$target" ]; then "$BASH" "$SELF" scope add "$target"; fi
+                ;;
+            8) "$BASH" "$SELF" results ;;
+            q|Q) return 0 ;;
+            *) warn "Geçersiz seçim." ;;
+        esac || true
+    done
+}
+
+# --- main ---------------------------------------------------------------------
+
+main() {
+    local args=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --tor)          USE_TOR=1 ;;
+            -p|--ports)     [ $# -ge 2 ] || die "$1 bir değer bekliyor."; PORTS=$2; shift ;;
+            --top)          [ $# -ge 2 ] || die "$1 bir değer bekliyor."; TOP=$2; shift ;;
+            --sv)           SERVICE_VERSIONS=1 ;;
+            -s|--severity)  [ $# -ge 2 ] || die "$1 bir değer bekliyor."; SEVERITY=$2; shift ;;
+            --no-nuclei)    DO_NUCLEI=0 ;;
+            --no-tls)       DO_TLS=0 ;;
+            --name)         [ $# -ge 2 ] || die "$1 bir değer bekliyor."; NAME=$2; shift ;;
+            --json)         JSON_OUT=1 ;;
+            -y|--yes)       ASSUME_YES=1 ;;
+            -h|--help)      usage; exit 0 ;;
+            --version)      echo "pisec $VERSION"; exit 0 ;;
+            --)             shift; args+=("$@"); break ;;
+            -*)             usage >&2; die "Bilinmeyen seçenek: $1" ;;
+            *)              args+=("$1") ;;
+        esac
+        shift
+    done
+
+    [[ -z $PORTS || $PORTS =~ ^[0-9][0-9,-]*$ ]] || die "Geçersiz port listesi: $PORTS"
+    [[ -z $TOP || $TOP =~ ^[1-9][0-9]*$ ]] || die "--top bir sayı bekliyor: $TOP"
+    [[ $SEVERITY =~ ^(info|low|medium|high|critical|unknown)(,(info|low|medium|high|critical|unknown))*$ ]] \
+        || die "Geçersiz önem listesi: $SEVERITY"
+
+    if [ ${#args[@]} -eq 0 ]; then
+        if [ -t 0 ]; then menu; exit 0; fi
+        usage >&2
+        exit 1
+    fi
+
+    local cmd=${args[0]}
+    args=("${args[@]:1}")
+    case $cmd in
+        tor)          cmd_tor "${args[@]}" ;;
+        lan)          cmd_lan "${args[@]}" ;;
+        scan)         cmd_scan "${args[@]}" ;;
+        recon)        cmd_recon "${args[@]}" ;;
+        web)          cmd_web "${args[@]}" ;;
+        scope)        cmd_scope "${args[@]}" ;;
+        results)      cmd_results "${args[@]}" ;;
+        schedule)     cmd_schedule "${args[@]}" ;;
+        notify)       cmd_notify "${args[@]}" ;;
+        publish)      cmd_publish "${args[@]}" ;;
+        tunnel)       cmd_tunnel "${args[@]}" ;;
+        panel)        cmd_panel "${args[@]}" ;;
+        version)      echo "pisec $VERSION" ;;
+        help)         usage ;;
+        *)            usage >&2; die "Bilinmeyen komut: $cmd" ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#
+# Testlerde gerçek araçların yerine geçer. test/bin altındaki her araç adı bu
+# dosyaya bağlanıyor: çağrıyı $MOCK_LOG'a yazar, aracın ürettiği dosyaları sahte
+# içerikle oluşturur.
+#
+name=$(basename "$0")
+{ printf '%s' "$name"; printf ' %s' "$@"; echo; } >> "$MOCK_LOG"
+
+# Bir seçeneğin değerini döndürür: opt -o "$@"
+opt() {
+    local want=$1
+    shift
+    while [ $# -gt 0 ]; do
+        if [ "$1" = "$want" ]; then
+            printf '%s\n' "$2"
+            return
+        fi
+        shift
+    done
+}
+
+case $name in
+    curl)
+        hdr=$(opt -D "$@")
+        if [ -n "$hdr" ]; then
+            printf 'HTTP/2 301\r\nlocation: https://www.hedef.com/\r\n\r\nHTTP/2 200\r\ncontent-type: text/html\r\nx-content-type-options: nosniff\r\nserver: nginx/1.24.0\r\n\r\n' > "$hdr"
+        else
+            echo '{"IsTor":true,"IP":"203.0.113.9"}'
+        fi
+        ;;
+    tor-resolve)
+        echo "${MOCK_RESOLVE:-198.51.100.7}"
+        ;;
+    proxychains4)
+        [ "$1" = -f ] || exit 99
+        cp "$2" "$MOCK_DIR/proxychains.conf"
+        shift 2
+        exec "$@"
+        ;;
+    sudo)
+        case $1 in -n|-v) exit 0 ;; esac
+        if [ -n "${MOCK_SUDO_NOEXEC:-}" ]; then exit 0; fi
+        exec "$@"
+        ;;
+    nmap)
+        base=$(opt -oA "$@")
+        target=${!#}
+        if printf '%s\n' "$@" | grep -qx -- -sn; then
+            cat > "$base.nmap" <<'EOF'
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-10-30 12:00 +03
+Nmap scan report for router.lan (192.168.1.1)
+Host is up (0.0040s latency).
+MAC Address: AA:BB:CC:DD:EE:01 (Ubiquiti Networks)
+Nmap scan report for 192.168.1.23
+Host is up (0.10s latency).
+MAC Address: AA:BB:CC:DD:EE:02 (Apple)
+Nmap scan report for pi2-hacker (192.168.1.108)
+Host is up.
+Nmap done: 256 IP addresses (3 hosts up) scanned in 2.50 seconds
+EOF
+            : > "$base.gnmap"
+        else
+            printf 'Host: %s ()\tStatus: Up\nHost: %s ()\tPorts: %s\tIgnored State: closed (997)\n' "$target" "$target" \
+                "${MOCK_PORTS:-22/open/tcp//ssh//OpenSSH 9.2p1/, 80/open/tcp//http//nginx/, 443/closed/tcp//https///}" > "$base.gnmap"
+            : > "$base.nmap"
+        fi
+        : > "$base.xml"
+        ;;
+    subfinder)
+        # shellcheck disable=SC2086
+        printf '%s\n' ${MOCK_SUBS:-www.hedef.com api.hedef.com} > "$(opt -o "$@")"
+        ;;
+    dnsx)
+        while read -r h; do echo "$h [A] [203.0.113.20]"; done < "$(opt -l "$@")" > "$(opt -o "$@")"
+        ;;
+    httpx)
+        echo "https://www.hedef.com [200] [Ana sayfa] [nginx]" > "$(opt -o "$@")"
+        ;;
+    testssl)
+        echo '[{"id":"BREACH","severity":"MEDIUM","finding":"potentially VULNERABLE"},{"id":"cert_expiration","severity":"HIGH","finding":"expires in 3 days"},{"id":"TLS1_3","severity":"OK","finding":"offered"}]' \
+            > "$(opt --jsonfile "$@")"
+        ;;
+    nuclei)
+        echo "[git-config] [http] [medium] https://hedef.com/.git/config" > "$(opt -o "$@")"
+        ;;
+    ip)
+        case "$*" in
+            "route show default")
+                echo "default via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.108 metric 600" ;;
+            *addr*)
+                echo "3: wlan0    inet 192.168.1.108/24 brd 192.168.1.255 scope global dynamic noprefixroute wlan0" ;;
+        esac
+        ;;
+    systemctl)
+        # Birimlerin "çalışıyor" durumu $MOCK_DIR/active-<birim> dosyalarıyla tutuluyor.
+        if [ "$1" = --user ]; then shift; fi
+        case $1 in
+            is-active)
+                shift
+                quiet=0
+                if [ "$1" = --quiet ]; then quiet=1; shift; fi
+                rc=0
+                for u in "$@"; do
+                    if [ -e "$MOCK_DIR/active-$u" ]; then state=active; else state=inactive; rc=3; fi
+                    if [ "$quiet" -eq 0 ]; then echo "$state"; fi
+                done
+                exit "$rc"
+                ;;
+            stop) rm -f "$MOCK_DIR/active-$2" ;;
+            show) echo "Fri 2026-10-31 03:00:00 +03" ;;
+        esac
+        ;;
+    systemd-analyze)
+        case "$*" in *bozuk*) exit 1 ;; esac
+        ;;
+    systemd-run)
+        unit="" logfile=""
+        while [ $# -gt 0 ]; do
+            case $1 in
+                --unit) unit=$2; shift ;;
+                --logfile) logfile=$2; shift ;;
+            esac
+            shift
+        done
+        touch "$MOCK_DIR/active-$unit"
+        if [ -n "$logfile" ]; then
+            echo '2026-10-30T12:00:00Z INF |  https://deneme-ornek-adres.trycloudflare.com  |' >> "$logfile"
+        fi
+        ;;
+    cloudflared)
+        ;;
+    *)
+        echo "mock: $name tanımlı değil" >&2
+        exit 99
+        ;;
+esac
