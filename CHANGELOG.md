@@ -13,6 +13,9 @@ sürümler [Semantic Versioning](https://semver.org/lang/tr/) ile numaralanıyor
   ile çözülüyor, testssl.sh'ın DNS sorguları kapatılıyor, nuclei sadece HTTP
   şablonlarıyla ve interactsh kapalı çalışıyor. Her çalıştırma ayrı bir Tor devresi
   kullanıyor. Ham soket isteyen nmap seçenekleri ve özel adresler reddediliyor.
+  `tor-resolve` bir adı çözemezse sorgu Tor üzerinden DNS-over-HTTPS ile yapılıyor.
+  subfinder'ın proxy'siz bağlanan crt.sh kaynağı ve ProjectDiscovery araçlarının
+  sürüm kontrolü kapalı. Pi 4'te tcpdump ile denendi: hedefler için DNS sorgusu çıkmıyor.
 - Kapsam listesi (`~/.config/pisec/kapsam`).
 - Her çalıştırma için sonuç klasörü, `ozet.md` ve `komutlar.txt`.
 - `recon` ve `scan` önceki çalıştırmayla karşılaştırma yapıyor.
