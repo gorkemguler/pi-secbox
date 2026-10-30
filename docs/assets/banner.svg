@@ -17,9 +17,11 @@
     </radialGradient>
   </defs>
 
-  <rect width="1280" height="400" fill="url(#bg)"/>
-  <rect width="1280" height="400" fill="url(#grid)" opacity="0.55"/>
-  <rect width="1280" height="400" fill="url(#glow)"/>
+  <g id="background">
+    <rect width="1280" height="400" fill="url(#bg)"/>
+    <rect width="1280" height="400" fill="url(#grid)" opacity="0.55"/>
+    <rect width="1280" height="400" fill="url(#glow)"/>
+  </g>
 
   <!-- logo -->
   <g transform="translate(64 70) scale(1.75)">

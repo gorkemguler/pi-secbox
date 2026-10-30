@@ -16,6 +16,7 @@ setup_mocks() {
     : > "$MOCK_LOG"
     export PATH="$MOCK_DIR/bin:$PATH"
     export HOME=$MOCK_DIR/home
+    export XDG_CONFIG_HOME=$HOME/.config
     export PISEC_OUT=$HOME/pisec-sonuclar
     export PISEC_SCOPE=$HOME/.config/pisec/kapsam
     export PISEC_STATE=$HOME/.local/state/pisec
