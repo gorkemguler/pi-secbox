@@ -8,6 +8,8 @@ set -euo pipefail
 
 PDTM_TOOLS="nuclei,subfinder,httpx,naabu,dnsx"
 PDTM_BIN="$HOME/.pdtm/go/bin"
+TEMPLATES_DIR="$HOME/nuclei-templates"
+NUCLEI_CONF="$HOME/.config/nuclei/config.yaml"
 TESTSSL_DIR="/opt/testssl.sh"
 TESTSSL_BRANCH="3.2"
 PROXYCHAINS_CONF="/etc/proxychains4.conf"
@@ -16,16 +18,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DO_UPGRADE=1
 DO_FIREWALL=1
+TMP_DIR=""
+SUDO_KEEPALIVE_PID=""
 
 log()  { printf '\n[+] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
 die()  { printf '[x] %s\n' "$*" >&2; exit 1; }
 
+cleanup() {
+    if [ -n "$SUDO_KEEPALIVE_PID" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
+    if [ -n "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi
+}
+trap cleanup EXIT
+
 usage() {
     cat <<EOF
 Kullanım: ./setup.sh [seçenekler]
 
-  --no-upgrade    apt upgrade adımını atla
+  --no-upgrade    apt full-upgrade adımını atla
   --no-firewall   ufw ayarlarına dokunma
   -h, --help      bu yardımı göster
 EOF
@@ -58,6 +68,9 @@ case "$(uname -m)" in
 esac
 
 sudo -v
+# apt full-upgrade yavaş bir kartta sudo'nun 15 dakikalık süresini aşabiliyor.
+while true; do sudo -n true; sleep 50; done 2>/dev/null &
+SUDO_KEEPALIVE_PID=$!
 
 # --- Paketler -----------------------------------------------------------------
 
@@ -90,7 +103,7 @@ apt_get install "${PACKAGES[@]}"
 
 # Pi Connect kullanıcı servisi olarak çalışıyor; oturum kapalıyken de ayakta kalsın.
 if dpkg -s rpi-connect-lite >/dev/null 2>&1 || dpkg -s rpi-connect >/dev/null 2>&1; then
-    sudo loginctl enable-linger "$USER"
+    sudo loginctl enable-linger "$(id -un)"
 fi
 
 # --- PATH ---------------------------------------------------------------------
@@ -115,24 +128,48 @@ if ! command -v pdtm >/dev/null; then
     [ -n "$tag" ] && [ "$tag" != "null" ] || die "pdtm sürüm bilgisi alınamadı."
     ver=${tag#v}
     zip="pdtm_${ver}_linux_${ARCH}.zip"
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    TMP_DIR=$(mktemp -d)
     base="https://github.com/projectdiscovery/pdtm/releases/download/$tag"
-    curl -fsSL -o "$tmp/$zip" "$base/$zip"
-    curl -fsSL -o "$tmp/checksums.txt" "$base/pdtm_${ver}_checksums.txt"
-    (cd "$tmp" && grep "  $zip\$" checksums.txt | sha256sum -c --quiet -) \
+    curl -fsSL -o "$TMP_DIR/$zip" "$base/$zip"
+    curl -fsSL -o "$TMP_DIR/checksums.txt" "$base/pdtm_${ver}_checksums.txt"
+    (cd "$TMP_DIR" && grep "  $zip\$" checksums.txt | sha256sum -c --quiet -) \
         || die "pdtm arşivinin SHA256 doğrulaması başarısız."
-    unzip -o -q "$tmp/$zip" pdtm -d "$tmp"
+    unzip -o -q "$TMP_DIR/$zip" pdtm -d "$TMP_DIR"
     mkdir -p "$PDTM_BIN"
-    install -m 755 "$tmp/pdtm" "$PDTM_BIN/pdtm"
+    install -m 755 "$TMP_DIR/pdtm" "$PDTM_BIN/pdtm"
 fi
 
 log "nuclei, subfinder, httpx, naabu ve dnsx kuruluyor / güncelleniyor"
 pdtm -duc -dc -nc -i "$PDTM_TOOLS"
 pdtm -duc -dc -nc -u "$PDTM_TOOLS"
 
-log "Nuclei şablonları güncelleniyor"
-nuclei -update-templates -silent || warn "Şablonlar indirilemedi, sonra 'nuclei -ut' ile tekrar dene."
+has_templates() { find "$TEMPLATES_DIR" -name '*.yaml' -print -quit 2>/dev/null | grep -q .; }
+
+# nuclei şablon arşivini (~20 MB) 30 saniyelik sabit bir süre sınırıyla indiriyor.
+# Yavaş Wi-Fi'de bu yetmiyor ve nuclei hata vermeden boş bir dizin bırakıyor.
+# O durumda depoyu git ile çekip nuclei'nin açılıştaki güncelleme denemesini
+# kapatıyoruz, yoksa her çalıştırmada yarım dakika bekliyor.
+if [ -d "$TEMPLATES_DIR/.git" ]; then
+    log "Nuclei şablonları güncelleniyor (git)"
+    git -C "$TEMPLATES_DIR" pull -q --ff-only || warn "Şablonlar güncellenemedi."
+else
+    log "Nuclei şablonları indiriliyor"
+    nuclei -update-templates >/dev/null 2>&1 || true
+    if ! has_templates; then
+        warn "nuclei şablonları indiremedi (bağlantı yavaş olabilir), git ile çekiliyor."
+        if [ -d "$TEMPLATES_DIR" ]; then
+            rmdir "$TEMPLATES_DIR" 2>/dev/null || mv "$TEMPLATES_DIR" "$TEMPLATES_DIR.$(date +%s).bak"
+        fi
+        git clone -q --depth 1 https://github.com/projectdiscovery/nuclei-templates.git "$TEMPLATES_DIR"
+        mkdir -p "$(dirname "$NUCLEI_CONF")"
+        if grep -q '^#\?disable-update-check:' "$NUCLEI_CONF" 2>/dev/null; then
+            sed -i 's/^#\?disable-update-check:.*/disable-update-check: true/' "$NUCLEI_CONF"
+        else
+            echo 'disable-update-check: true' >> "$NUCLEI_CONF"
+        fi
+    fi
+fi
+has_templates || warn "nuclei şablonları kurulamadı. 'nuclei -ut -v' çıktısına bak."
 
 # --- testssl.sh ---------------------------------------------------------------
 
@@ -178,8 +215,8 @@ else
     warn "--no-firewall verildi, ufw ayarlarına dokunulmadı."
 fi
 
-# Debian 12 ve sonrasında /var/log/auth.log yok; sshd jail'i journald'dan okumazsa
-# fail2ban hiç açılmıyor.
+# Debian 12'de /var/log/auth.log yok; sshd jail'i journald'dan okumazsa fail2ban
+# açılmıyor. Debian 13 paketi bunu zaten yapıyor, burada iki sürüm için de yazıyoruz.
 log "fail2ban sshd jail'i ayarlanıyor"
 sudo tee /etc/fail2ban/jail.d/pisecbox.local >/dev/null <<'EOF'
 [sshd]

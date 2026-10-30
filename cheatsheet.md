@@ -45,6 +45,10 @@ nuclei -u https://hedef.com -proxy socks5://127.0.0.1:9050 -s critical,high -rl 
 nuclei -ut                                                    # şablonları güncelle
 ```
 
+Şablonlar `~/nuclei-templates` altında. Bağlantı yavaşsa `nuclei -ut` sessizce başarısız
+olabiliyor; `setup.sh` bu durumda şablonları git ile çeker. Öyle kurulduysa güncellemek için
+`git -C ~/nuclei-templates pull` kullan.
+
 ## subfinder, httpx, dnsx, naabu
 
 ```bash
@@ -71,7 +75,7 @@ DNS sorguları Tor dışına çıkar. Gizlilik önemliyse testssl'i Tor üzerind
 
 ```bash
 pdtm -ua                         # ProjectDiscovery araçları
-nuclei -ut                       # nuclei şablonları
+nuclei -ut                       # nuclei şablonları (git ile kurulduysa: git -C ~/nuclei-templates pull)
 sudo git -C /opt/testssl.sh pull # testssl.sh
 sudo apt update && sudo apt full-upgrade
 ```

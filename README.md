@@ -26,11 +26,18 @@ Paketlerin dışında betik şunları yapıyor:
 
 - **ufw**: gelen bağlantıları kapatır, giden trafiğe dokunmaz. SSH portunu `sshd`
   ayarından okuyup açık bırakır (rate limit ile).
-- **fail2ban**: sshd jail'ini journald'dan okuyacak şekilde ayarlar. Debian 12'den beri
-  `/var/log/auth.log` olmadığı için varsayılan ayarla fail2ban hiç başlamıyor.
+- **fail2ban**: sshd jail'ini journald'dan okuyacak şekilde ayarlar. Debian 12'de
+  `/var/log/auth.log` olmadığı için varsayılan ayarla fail2ban başlamıyordu. Debian 13
+  paketi bunu kendisi çözüyor, betik iki sürümde de aynı ayarı yazıyor.
 - **proxychains4**: Tor'un SOCKS5 portuna (`127.0.0.1:9050`) yönlendirir, DNS
   sorgularını da proxy üzerinden yaptırır. Orijinal dosya `/etc/proxychains4.conf.orig`
   olarak saklanır.
+- **nuclei şablonları**: önce `nuclei -ut` ile indirir. nuclei şablon arşivini 30
+  saniyelik sabit bir süre sınırıyla indirdiği için yavaş bağlantıda bu adım hata
+  vermeden boş bir dizin bırakabiliyor. Betik bunu fark ederse şablonları
+  `git clone --depth 1` ile çeker ve nuclei'nin her açılışta tekrar güncellemeyi
+  denememesi için `~/.config/nuclei/config.yaml` içinde `disable-update-check: true`
+  ayarını açar.
 - **PATH**: `~/.bashrc` sonuna pdtm'nin binary dizinini ekler.
 - **Komut notları**: [`cheatsheet.md`](cheatsheet.md) dosyasını `~/pisecbox-cheatsheet.md`
   olarak kopyalar.
@@ -40,10 +47,14 @@ Betik tekrar çalıştırılabilir. İkinci çalıştırmada araçları ve tests
 
 ## Gereksinimler
 
-- 64-bit Raspberry Pi OS Lite (Bookworm veya Trixie). Debian tabanlı başka sistemlerde de
-  çalışır, sadece Pi Connect adımı atlanır.
+- 64-bit Raspberry Pi OS Lite. Debian tabanlı başka sistemlerde de çalışması gerekir,
+  sadece Pi Connect adımı atlanır.
 - `sudo` yetkisi olan normal bir kullanıcı. Betik root olarak çalıştırılırsa durur.
-- İnternet bağlantısı ve SD kartta en az 2 GB boş alan (nuclei şablonları dahil).
+- İnternet bağlantısı ve SD kartta yaklaşık 1 GB boş alan. ProjectDiscovery araçları
+  ~280 MB, nuclei şablonları ~100 MB, testssl.sh ~25 MB, geri kalanı apt paketleri.
+
+Test edildiği ortam: Raspberry Pi 4 Model B (2 GB), Raspberry Pi OS Lite 64-bit
+(Debian 13 Trixie), Wi-Fi. Bookworm ve 32-bit sistemlerde denenmedi.
 
 ## Kurulum
 
