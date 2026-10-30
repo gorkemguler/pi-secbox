@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # pi-secbox kurulum betiği
-# Raspberry Pi OS Lite üzerine ağ keşfi / denetim araçlarını, Tor + proxychains'i
-# ve temel sıkılaştırmayı (ufw, fail2ban) kurar. Birden fazla kez çalıştırılabilir.
+# Raspberry Pi OS Lite üzerine ağ keşfi / denetim araçlarını, Tor + proxychains'i,
+# pisec komutunu ve temel sıkılaştırmayı (ufw, fail2ban) kurar. İsteğe bağlı olarak
+# web panelini, Docker'ı ve cloudflared'ı ekler. Birden fazla kez çalıştırılabilir.
 #
 set -euo pipefail
 
@@ -14,10 +15,18 @@ TESTSSL_DIR="/opt/testssl.sh"
 TESTSSL_BRANCH="3.2"
 PROXYCHAINS_CONF="/etc/proxychains4.conf"
 CHEATSHEET="$HOME/pisecbox-cheatsheet.md"
+PANEL_DIR="/usr/local/lib/pisec-panel"
+UNIT_DIR="$HOME/.config/systemd/user"
+CLOUDFLARE_KEY="/usr/share/keyrings/cloudflare-public-v2.gpg"
+CLOUDFLARE_LIST="/etc/apt/sources.list.d/cloudflared.list"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DO_UPGRADE=1
 DO_FIREWALL=1
+WITH_PANEL=0
+WITH_DOCKER=0
+WITH_CLOUDFLARED=0
+RELOGIN=0
 TMP_DIR=""
 SUDO_KEEPALIVE_PID=""
 
@@ -35,9 +44,13 @@ usage() {
     cat <<EOF
 Kullanım: ./setup.sh [seçenekler]
 
-  --no-upgrade    apt full-upgrade adımını atla
-  --no-firewall   ufw ayarlarına dokunma
-  -h, --help      bu yardımı göster
+  --no-upgrade        apt full-upgrade adımını atla
+  --no-firewall       ufw ayarlarına dokunma
+  --with-panel        web panelini kur (sadece 127.0.0.1'de dinler)
+  --with-docker       Docker ve docker compose kur
+  --with-cloudflared  Cloudflare'ın apt deposundan cloudflared kur
+  --all               panel, Docker ve cloudflared'ın üçü birden
+  -h, --help          bu yardımı göster
 EOF
 }
 
@@ -50,6 +63,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-upgrade)  DO_UPGRADE=0 ;;
         --no-firewall) DO_FIREWALL=0 ;;
+        --with-panel)  WITH_PANEL=1 ;;
+        --with-docker) WITH_DOCKER=1 ;;
+        --with-cloudflared) WITH_CLOUDFLARED=1 ;;
+        --all)         WITH_PANEL=1; WITH_DOCKER=1; WITH_CLOUDFLARED=1 ;;
         -h|--help)     usage; exit 0 ;;
         *)             usage >&2; die "Bilinmeyen seçenek: $1" ;;
     esac
@@ -74,6 +91,14 @@ SUDO_KEEPALIVE_PID=$!
 
 # --- Paketler -----------------------------------------------------------------
 
+if [ "$WITH_CLOUDFLARED" -eq 1 ] && [ ! -f "$CLOUDFLARE_LIST" ]; then
+    log "Cloudflare apt deposu ekleniyor"
+    sudo install -d -m 755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee "$CLOUDFLARE_KEY" >/dev/null
+    echo "deb [signed-by=$CLOUDFLARE_KEY] https://pkg.cloudflare.com/cloudflared any main" \
+        | sudo tee "$CLOUDFLARE_LIST" >/dev/null
+fi
+
 log "Paket listesi güncelleniyor"
 apt_get update
 if [ "$DO_UPGRADE" -eq 1 ]; then
@@ -86,7 +111,7 @@ PACKAGES=(
     tor torsocks proxychains4
     ufw fail2ban python3-systemd
     tmux git curl wget jq unzip
-    bsdextrautils procps
+    bsdextrautils procps python3
 )
 
 # Masaüstü sürümünde rpi-connect kurulu olabilir, lite paketi onunla çakışıyor.
@@ -98,13 +123,24 @@ else
     warn "rpi-connect-lite depoda yok (Raspberry Pi OS değil mi?), atlanıyor."
 fi
 
+if [ "$WITH_PANEL" -eq 1 ]; then PACKAGES+=(python3-flask python3-waitress); fi
+if [ "$WITH_CLOUDFLARED" -eq 1 ]; then PACKAGES+=(cloudflared); fi
+if [ "$WITH_DOCKER" -eq 1 ]; then
+    PACKAGES+=(docker.io)
+    # Debian 13'te compose v2 "docker-compose", Ubuntu'da "docker-compose-v2" paketinde.
+    if apt-cache show docker-compose-v2 >/dev/null 2>&1; then
+        PACKAGES+=(docker-compose-v2)
+    elif apt-cache show docker-compose >/dev/null 2>&1; then
+        PACKAGES+=(docker-compose)
+    fi
+fi
+
 log "Paketler kuruluyor"
 apt_get install "${PACKAGES[@]}"
 
-# Pi Connect kullanıcı servisi olarak çalışıyor; oturum kapalıyken de ayakta kalsın.
-if dpkg -s rpi-connect-lite >/dev/null 2>&1 || dpkg -s rpi-connect >/dev/null 2>&1; then
-    sudo loginctl enable-linger "$(id -un)"
-fi
+# Zamanlanmış taramalar, panel ve Pi Connect kullanıcı servisi olarak çalışıyor;
+# linger açık olmazsa oturum kapanınca hepsi duruyor.
+sudo loginctl enable-linger "$(id -un)"
 
 # --- PATH ---------------------------------------------------------------------
 
@@ -199,6 +235,13 @@ sudo sed -i -E \
     -e 's/^socks4[[:space:]]+127\.0\.0\.1[[:space:]]+9050$/socks5 127.0.0.1 9050/' \
     "$PROXYCHAINS_CONF"
 
+# "pisec tor new" Tor'un kontrol soketini (/run/tor/control) kullanıyor. Debian
+# paketi soketi ve çerez dosyasını debian-tor grubuna açıyor.
+if ! id -nG "$(id -un)" | tr ' ' '\n' | grep -x debian-tor >/dev/null; then
+    sudo usermod -aG debian-tor "$(id -un)"
+    RELOGIN=1
+fi
+
 # --- Güvenlik duvarı ve fail2ban ----------------------------------------------
 
 if [ "$DO_FIREWALL" -eq 1 ]; then
@@ -229,7 +272,59 @@ EOF
 sudo systemctl enable fail2ban >/dev/null 2>&1
 sudo systemctl restart fail2ban
 
-# --- Komut notları ------------------------------------------------------------
+# --- pisec ve komut notları ---------------------------------------------------
+
+log "pisec kuruluyor"
+if [ -f "$SCRIPT_DIR/pisec" ]; then
+    sudo install -m 755 "$SCRIPT_DIR/pisec" /usr/local/bin/pisec
+else
+    warn "pisec bulunamadı, kurulmadı."
+fi
+
+# --- İsteğe bağlı: Docker ve web paneli -----------------------------------------
+
+if [ "$WITH_DOCKER" -eq 1 ]; then
+    log "Docker açılıyor"
+    sudo systemctl enable --now docker
+    # docker grubu root'a denk yetki veriyor; panel konteynerleri bu yetkiyle yönetiyor.
+    if ! id -nG "$(id -un)" | tr ' ' '\n' | grep -x docker >/dev/null; then
+        sudo usermod -aG docker "$(id -un)"
+        RELOGIN=1
+    fi
+fi
+
+if [ "$WITH_PANEL" -eq 1 ]; then
+    log "Web paneli kuruluyor ($PANEL_DIR)"
+    sudo install -d -m 755 "$PANEL_DIR"
+    sudo cp -R "$SCRIPT_DIR/panel/app.py" "$SCRIPT_DIR/panel/templates" "$SCRIPT_DIR/panel/static" "$PANEL_DIR/"
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/pisec-panel.service" <<EOF
+# setup.sh --with-panel ile oluşturuldu
+[Unit]
+Description=pisec web paneli
+
+[Service]
+Environment=PATH=%h/.pdtm/go/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 $PANEL_DIR/app.py serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    if [ ! -f "$HOME/.config/pisec/panel.json" ]; then
+        if [ -t 0 ]; then
+            python3 "$PANEL_DIR/app.py" passwd
+        else
+            warn "Panel parolası belirlenmedi. Sonra: pisec panel passwd && pisec panel start"
+        fi
+    fi
+    if [ -f "$HOME/.config/pisec/panel.json" ]; then
+        systemctl --user enable pisec-panel.service >/dev/null 2>&1
+        systemctl --user restart pisec-panel.service
+    fi
+fi
 
 if [ -f "$SCRIPT_DIR/cheatsheet.md" ]; then
     install -m 644 "$SCRIPT_DIR/cheatsheet.md" "$CHEATSHEET"
@@ -241,7 +336,10 @@ fi
 
 log "Kurulan araçlar"
 missing=0
-for t in nmap tshark tor proxychains4 pdtm nuclei subfinder httpx naabu dnsx testssl; do
+tools=(nmap tshark tor proxychains4 pdtm nuclei subfinder httpx naabu dnsx testssl pisec)
+if [ "$WITH_DOCKER" -eq 1 ]; then tools+=(docker); fi
+if [ "$WITH_CLOUDFLARED" -eq 1 ]; then tools+=(cloudflared); fi
+for t in "${tools[@]}"; do
     if command -v "$t" >/dev/null; then
         printf '    %-12s tamam\n' "$t"
     else
@@ -267,6 +365,17 @@ else
 fi
 
 echo
-echo "Bitti. PATH için yeni bir kabuk aç ya da 'source ~/.bashrc' çalıştır."
+if [ "$RELOGIN" -eq 1 ]; then
+    echo "Bitti. Yeni grup üyelikleri (debian-tor, docker) için Pi'yi yeniden başlat:"
+    echo "  sudo reboot"
+    echo "Yeniden başlatmadan sadece yeni oturumlar görür; panel gibi arka plan servisleri görmez."
+else
+    echo "Bitti. PATH için yeni bir kabuk aç ya da 'source ~/.bashrc' çalıştır."
+fi
+if [ "$WITH_PANEL" -eq 1 ]; then
+    echo "Panel: http://127.0.0.1:8090 (Pi üzerinde). Başka bir bilgisayardan:"
+    echo "  ssh -L 8090:127.0.0.1:8090 $(id -un)@$(hostname).local   sonra tarayıcıda http://localhost:8090"
+fi
+echo "Başlamak için: pisec --help"
 echo "Komut notları: $CHEATSHEET"
 [ "$missing" -eq 0 ] || exit 1
