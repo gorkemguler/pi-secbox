@@ -7,3 +7,6 @@ outputs/
 results/
 
 *.zip
+__pycache__/
+*.pyc
+!panel/demo/data/state/jobs/*.log
