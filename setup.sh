@@ -125,7 +125,7 @@ export PATH="$PDTM_BIN:$PATH"
 if ! command -v pdtm >/dev/null; then
     log "pdtm indiriliyor"
     tag=$(curl -fsSL https://api.github.com/repos/projectdiscovery/pdtm/releases/latest | jq -r .tag_name)
-    [ -n "$tag" ] && [ "$tag" != "null" ] || die "pdtm sürüm bilgisi alınamadı."
+    if [ -z "$tag" ] || [ "$tag" = "null" ]; then die "pdtm sürüm bilgisi alınamadı."; fi
     ver=${tag#v}
     zip="pdtm_${ver}_linux_${ARCH}.zip"
     TMP_DIR=$(mktemp -d)
